@@ -4,7 +4,9 @@ Windows 11 x64용 CPU·RAM·GPU·네트워크 상태 위젯입니다. 작은 위
 
 ## 실행과 사용
 
-배포 ZIP을 빈 폴더에 모두 압축 해제한 뒤 `ResourceStatus.exe`를 실행합니다. Windows 11 빌드 22621 이상을 대상으로 하며 관리자 권한이나 별도의 .NET 설치는 필요하지 않습니다. EXE와 함께 배포된 DLL 파일도 같은 폴더에 보관하세요.
+[GitHub 릴리즈](https://github.com/osias10/windget-resource/releases/latest)에서 `ResourceStatus-0.0.1-win-x64-setup.exe`를 받아 설치합니다. 현재 사용자용으로 설치되며 시작 메뉴에서 **Resource Status**를 실행할 수 있습니다. Windows 11 x64 빌드 22621 이상을 대상으로 하며 관리자 권한이나 별도의 .NET 설치는 필요하지 않습니다.
+
+설치 없이 사용하려면 `ResourceStatus-0.0.1-win-x64.zip`을 빈 폴더에 모두 압축 해제한 뒤 `ResourceStatus.exe`를 실행합니다. EXE와 함께 배포된 DLL 파일도 같은 폴더에 보관하세요. 설치·업데이트·제거 전에는 트레이 메뉴의 **종료**로 위젯을 완전히 종료하세요. 제거해도 사용자 설정은 보존됩니다.
 
 - 위젯을 드래그하여 이동합니다. 작은 위젯은 더블클릭하거나 우클릭 메뉴의 **설정**으로 표시 구성을 엽니다.
 - 우클릭 또는 트레이 메뉴의 **위젯 크기**에서 작게/크게를 전환합니다. 큰 위젯 상단에도 작은 크기 전환·고정·설정·숨김 버튼이 있습니다.
@@ -44,7 +46,15 @@ Windows 11 x64용 CPU·RAM·GPU·네트워크 상태 위젯입니다. 작은 위
 
 솔루션 Release 빌드, Core 자동 검증, `win-x64` 자체 포함 게시, 격리된 UI 스모크 검증을 순서대로 실행합니다. 검증 실패 시 새 ZIP을 배포 결과로 승격하지 않습니다. UI를 실행할 수 없는 빌드 환경에서는 `-SkipUiSmoke`를 명시할 수 있지만, 배포 전 UI 검증은 별도로 실행해야 합니다.
 
-결과물은 `.artifacts\publish\ResourceStatus.exe`와 `.artifacts\ResourceStatus-1.0.0-win-x64.zip`입니다. 빌드 중간 파일은 `.artifacts\build\…`로 격리합니다. 매번 빈 staging 폴더에서 게시하고 이전 publish 폴더는 `.artifacts\previous-publish-…`에 보관합니다. 검증 결과는 `.artifacts\validation\…`에 남습니다.
+결과물은 `.artifacts\publish\ResourceStatus.exe`와 `.artifacts\ResourceStatus-0.0.1-win-x64.zip`입니다. 빌드 중간 파일은 `.artifacts\build\…`로 격리합니다. 매번 빈 staging 폴더에서 게시하고 이전 publish 폴더는 `.artifacts\previous-publish-…`에 보관합니다. 검증 결과는 `.artifacts\validation\…`에 남습니다.
+
+설치 파일은 위 빌드가 성공한 뒤 Inno Setup 6으로 만듭니다. 결과물은 `.artifacts\ResourceStatus-0.0.1-win-x64-setup.exe`입니다.
+
+```powershell
+.\build\build-installer.ps1 -IsccPath 'C:\Program Files (x86)\Inno Setup 6\ISCC.exe'
+```
+
+`v0.0.1`처럼 `Directory.Build.props`의 버전과 일치하는 태그를 푸시하면 GitHub Actions가 빌드와 검증 후 설치 파일·포터블 ZIP·SHA-256 체크섬을 GitHub 릴리즈에 게시합니다.
 
 Core 검증만 실행하려면 다음 명령을 사용합니다. 별도 테스트 프레임워크 패키지를 설치하지 않는 콘솔 테스트이며 실패하면 0이 아닌 종료 코드를 반환합니다.
 
