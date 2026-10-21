@@ -24,6 +24,14 @@ New-Item -ItemType Directory -Path $testRoot -Force | Out-Null
 $userSettings = Join-Path $env:LOCALAPPDATA 'ResourceStatus\settings.json'
 $settingsHashBefore = if (Test-Path -LiteralPath $userSettings) { (Get-FileHash -LiteralPath $userSettings -Algorithm SHA256).Hash } else { $null }
 $uninstaller = Join-Path $installDir 'unins000.exe'
+$shortcutPaths = @(
+    (Join-Path ([Environment]::GetFolderPath('Programs')) 'ResourceStatus\ResourceStatus.lnk'),
+    (Join-Path ([Environment]::GetFolderPath('DesktopDirectory')) 'ResourceStatus.lnk')
+)
+$shortcutHashes = @{}
+foreach ($shortcut in $shortcutPaths) {
+    $shortcutHashes[$shortcut] = if (Test-Path -LiteralPath $shortcut) { (Get-FileHash -LiteralPath $shortcut -Algorithm SHA256).Hash } else { $null }
+}
 
 function Invoke-CheckedProcess {
     param([string]$FilePath, [string[]]$ProcessArguments)
@@ -40,6 +48,10 @@ $removed = $false
 try {
     Invoke-CheckedProcess -FilePath $InstallerPath -ProcessArguments @('/VERYSILENT', '/SUPPRESSMSGBOXES',
         '/NORESTART', '/NOICONS', '/TASKS=', ('/DIR="' + $installDir + '"'), ('/LOG="' + (Join-Path $testRoot 'install.log') + '"'))
+    foreach ($shortcut in $shortcutPaths) {
+        $installedShortcutHash = if (Test-Path -LiteralPath $shortcut) { (Get-FileHash -LiteralPath $shortcut -Algorithm SHA256).Hash } else { $null }
+        if ($shortcutHashes[$shortcut] -ne $installedShortcutHash) { throw 'Silent validation must not create or modify Start Menu or desktop shortcuts.' }
+    }
     $registration = Get-ItemProperty -LiteralPath $uninstallKey
     if ($registration.DisplayVersion -ne $version) { throw 'Installed application version is incorrect.' }
     if ($registration.InstallLocation.TrimEnd('\') -ne $installDir.TrimEnd('\')) { throw 'Installer did not use the isolated validation directory.' }
@@ -83,6 +95,7 @@ try {
         uninstallPassed = $true
         userPreferencesPreserved = $true
         unrelatedFilePreserved = $true
+        shortcutsUnchanged = $true
         smokeReport = $smokeOutput
     } | ConvertTo-Json | Set-Content -LiteralPath $reportPath -Encoding UTF8
     Write-Host "Installer validation passed: $reportPath"
