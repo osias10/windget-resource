@@ -15,6 +15,9 @@ public partial class App : Application
     private AppController? _controller;
     private MainWindow? _widget;
     private TrayService? _tray;
+    private UpdateService? _updateService;
+    private UpdateWindow? _updateWindow;
+    private string _updatesDirectory = string.Empty;
     private Mutex? _mutex;
     private EventWaitHandle? _activate;
     private RegisteredWaitHandle? _activationWait;
@@ -66,6 +69,8 @@ public partial class App : Application
                 _activationWait = ThreadPool.RegisterWaitForSingleObject(_activate, (_, _) => Dispatcher.BeginInvoke(new Action(() => _widget?.ShowWidget())), null, Timeout.Infinite, false);
             }
             _controller = new AppController(Path.Combine(dataDir, "settings.json"), demo);
+            _updatesDirectory = Path.Combine(dataDir, "Updates");
+            _controller.UpdateRequested += ShowUpdates;
             Theme.Apply(_controller.Settings.Theme);
             if (e.Args.Contains("--expanded")) _controller.Settings.WidgetMode = WidgetMode.Expanded;
             if (smoke || demo)
@@ -105,6 +110,39 @@ public partial class App : Application
         catch (UnauthorizedAccessException) { }
     }
 
+    private async void ShowUpdates(object? sender, EventArgs e)
+    {
+        if (_exiting) return;
+        if (_updateWindow is not null)
+        {
+            _updateWindow.Show();
+            _updateWindow.Activate();
+            return;
+        }
+        _updateService ??= new UpdateService();
+        var window = new UpdateWindow(_updateService, _updatesDirectory);
+        _updateWindow = window;
+        window.Closed += (_, _) => { if (ReferenceEquals(_updateWindow, window)) _updateWindow = null; };
+        window.InstallRequested += path =>
+        {
+            try
+            {
+                // The setup waits for this process to exit before checking the app
+                // mutex or replacing files. A launch failure leaves the widget open.
+                UpdateInstaller.Start(path, _updatesDirectory);
+                ExitApp();
+            }
+            catch (Exception error) when (error is System.ComponentModel.Win32Exception or IOException or UnauthorizedAccessException or InvalidOperationException)
+            {
+                WriteError(error);
+                window.ShowInstallError("설치 프로그램을 시작하지 못했습니다. 다시 시도해 주세요.");
+            }
+        };
+        window.Show();
+        window.Activate();
+        await window.CheckForUpdatesAsync();
+    }
+
     private void ExitApp(int code = 0)
     {
         if (Cleanup()) Shutdown(code);
@@ -127,6 +165,9 @@ public partial class App : Application
     {
         if (_exiting) return false;
         _exiting = true;
+        if (_controller is not null) _controller.UpdateRequested -= ShowUpdates;
+        _updateWindow?.Close();
+        _updateService?.Dispose();
         _controller?.Dispose();
         _tray?.Dispose();
         _activationWait?.Unregister(null);

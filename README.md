@@ -4,9 +4,13 @@ Windows 11 x64용 CPU·RAM·GPU·네트워크 상태 위젯입니다. 작은 위
 
 ## 실행과 사용
 
-[GitHub 릴리즈](https://github.com/osias10/windget-resource/releases/latest)에서 `ResourceStatus-0.0.1-win-x64-setup.exe`를 받아 설치합니다. 현재 사용자용으로 설치되며 시작 메뉴에서 **Resource Status**를 실행할 수 있습니다. Windows 11 x64 빌드 22621 이상을 대상으로 하며 관리자 권한이나 별도의 .NET 설치는 필요하지 않습니다.
+[GitHub 릴리즈](https://github.com/osias10/windget-resource/releases/latest)에서 `ResourceStatus-0.0.2-win-x64-setup.exe`를 받아 설치합니다. 현재 사용자용으로 설치되며 시작 메뉴에서 **Resource Status**를 실행할 수 있습니다. Windows 11 x64 빌드 22621 이상을 대상으로 하며 관리자 권한이나 별도의 .NET 설치는 필요하지 않습니다.
 
-설치 없이 사용하려면 `ResourceStatus-0.0.1-win-x64.zip`을 빈 폴더에 모두 압축 해제한 뒤 `ResourceStatus.exe`를 실행합니다. EXE와 함께 배포된 DLL 파일도 같은 폴더에 보관하세요. 설치·업데이트·제거 전에는 트레이 메뉴의 **종료**로 위젯을 완전히 종료하세요. 제거해도 사용자 설정은 보존됩니다.
+설치 없이 사용하려면 `ResourceStatus-0.0.2-win-x64.zip`을 빈 폴더에 모두 압축 해제한 뒤 `ResourceStatus.exe`를 실행합니다. EXE와 함께 배포된 DLL 파일도 같은 폴더에 보관하세요. 설치 파일을 직접 실행하거나 앱을 제거할 때는 트레이 메뉴의 **종료**로 위젯을 완전히 종료하세요. 앱 내 업데이트는 종료를 자동으로 처리합니다. 제거해도 사용자 설정은 보존됩니다.
+
+`v0.0.1`에는 업데이트 메뉴가 없으므로 이번 `v0.0.2` 설치 파일로 한 번 업데이트해야 합니다. 이후에는 **설정 → 일반 → 업데이트 확인**, 위젯 우클릭 또는 트레이의 **업데이트 확인**을 사용합니다. 새 버전이 있으면 **다운로드 → 설치하고 다시 시작**을 누르세요. 설치된 앱은 기존 경로에 업데이트하며, 포터블 버전은 설치 마법사가 열립니다. 설정과 위치는 유지됩니다. 업데이트 확인과 설치는 사용자가 버튼을 누를 때 실행됩니다.
+
+업데이트 파일은 이 저장소의 정식 GitHub 릴리즈에서 받으며 파일 크기와 SHA-256 체크섬을 검사합니다. 취소하거나 검증에 실패한 다운로드는 실행하지 않습니다. 다운로드 경로는 `%LocalAppData%\ResourceStatus\Updates`입니다.
 
 - 위젯을 드래그하여 이동합니다. 작은 위젯은 더블클릭하거나 우클릭 메뉴의 **설정**으로 표시 구성을 엽니다.
 - 우클릭 또는 트레이 메뉴의 **위젯 크기**에서 작게/크게를 전환합니다. 큰 위젯 상단에도 작은 크기 전환·고정·설정·숨김 버튼이 있습니다.
@@ -17,7 +21,7 @@ Windows 11 x64용 CPU·RAM·GPU·네트워크 상태 위젯입니다. 작은 위
 - **일반 → 반투명 배경 → 배경 투명도**에서 0~100%를 조절합니다. 기본값은 25%이고, 값이 높을수록 배경이 투명해집니다. 글자·그래프·버튼은 선명하게 유지되며 두 위젯에 동일하게 적용됩니다. 반투명 배경을 끄면 불투명하게 표시하고 선택했던 투명도는 보존합니다. 변경은 즉시 보이고 조작을 멈추면 자동 저장됩니다.
 - Esc와 닫기는 트레이 숨김입니다. 완전히 종료하려면 트레이 메뉴의 **종료**를 사용합니다. 숨긴 동안 수집을 중단합니다.
 
-처음에는 작은 모드·항상 위 표시·반투명 배경이 켜지고 Windows 로그인 시 자동 시작은 꺼집니다. 작은 모드의 기본 폭은 240 DIP, 큰 모드는 320 DIP이며 내용에 맞춰 높이를 조절합니다. 화면이 작으면 내부에서 스크롤할 수 있습니다.
+처음에는 작은 모드·항상 위 표시·반투명 배경이 켜지고 Windows 로그인 시 자동 시작은 꺼집니다. 작은 모드의 기본 폭은 240 DIP, 큰 모드는 320 DIP이며 화면 배율을 반영해 내용에 맞춰 높이를 조절합니다. 내용이 모니터 작업 영역보다 길 때만 내부 스크롤을 제공합니다.
 
 배경 투명도는 원격 데스크톱에서도 적용됩니다. 100%에서도 이동과 우클릭을 사용할 수 있도록 최소한의 배경 감지 영역을 유지합니다. Windows 고대비 모드에서는 가독성을 위해 불투명하게 표시하며 선택한 투명도는 변경하지 않습니다.
 
@@ -46,15 +50,16 @@ Windows 11 x64용 CPU·RAM·GPU·네트워크 상태 위젯입니다. 작은 위
 
 솔루션 Release 빌드, Core 자동 검증, `win-x64` 자체 포함 게시, 격리된 UI 스모크 검증을 순서대로 실행합니다. 검증 실패 시 새 ZIP을 배포 결과로 승격하지 않습니다. UI를 실행할 수 없는 빌드 환경에서는 `-SkipUiSmoke`를 명시할 수 있지만, 배포 전 UI 검증은 별도로 실행해야 합니다.
 
-결과물은 `.artifacts\publish\ResourceStatus.exe`와 `.artifacts\ResourceStatus-0.0.1-win-x64.zip`입니다. 빌드 중간 파일은 `.artifacts\build\…`로 격리합니다. 매번 빈 staging 폴더에서 게시하고 이전 publish 폴더는 `.artifacts\previous-publish-…`에 보관합니다. 검증 결과는 `.artifacts\validation\…`에 남습니다.
+결과물은 `.artifacts\publish\ResourceStatus.exe`와 `.artifacts\ResourceStatus-0.0.2-win-x64.zip`입니다. 빌드 중간 파일은 `.artifacts\build\…`로 격리합니다. 매번 빈 staging 폴더에서 게시하고 이전 publish 폴더는 `.artifacts\previous-publish-…`에 보관합니다. 검증 결과는 `.artifacts\validation\…`에 남습니다.
 
-설치 파일은 위 빌드가 성공한 뒤 Inno Setup 6으로 만듭니다. 결과물은 `.artifacts\ResourceStatus-0.0.1-win-x64-setup.exe`입니다.
+설치 파일은 위 빌드가 성공한 뒤 Inno Setup 6으로 만듭니다. 결과물은 `.artifacts\ResourceStatus-0.0.2-win-x64-setup.exe`입니다.
 
 ```powershell
 .\build\build-installer.ps1 -IsccPath 'C:\Program Files (x86)\Inno Setup 6\ISCC.exe'
+.\build\test-installer.ps1
 ```
 
-`v0.0.1`처럼 `Directory.Build.props`의 버전과 일치하는 태그를 푸시하면 GitHub Actions가 빌드와 검증 후 설치 파일·포터블 ZIP·SHA-256 체크섬을 GitHub 릴리즈에 게시합니다.
+`v0.0.2`처럼 `Directory.Build.props`의 버전과 일치하는 태그를 푸시하면 GitHub Actions가 빌드와 검증 후 설치 파일·포터블 ZIP·SHA-256 체크섬을 GitHub 릴리즈에 게시합니다.
 
 Core 검증만 실행하려면 다음 명령을 사용합니다. 별도 테스트 프레임워크 패키지를 설치하지 않는 콘솔 테스트이며 실패하면 0이 아닌 종료 코드를 반환합니다.
 

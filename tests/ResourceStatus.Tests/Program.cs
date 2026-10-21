@@ -1,9 +1,195 @@
 using ResourceStatus.Core;
 using ResourceStatus.Native;
 using System.Text.Json;
+using System.Net;
+using System.Security.Cryptography;
+using System.Text;
 
 var cases = new (string Name, Action Run)[]
 {
+    ("Update tags require stable canonical numeric versions", () =>
+    {
+        foreach (string tag in new[] { "v0.0.2", "v1.10.0", "v12.0.123" })
+            Check(ReleaseUpdateMetadata.TryParseTag(tag, out _), tag);
+        foreach (string tag in new[] { "1.2.3", "v1.2", "v1.2.3.4", "v1.2.3-beta", "v1.2.3+build", "v01.2.3", "v-1.2.3", "v1. 2.3", "v999999999999.0.0", "v１.2.3" })
+            Check(!ReleaseUpdateMetadata.TryParseTag(tag, out _), tag);
+    }),
+    ("Update comparisons are numeric and ignore assembly revision", () =>
+    {
+        var fixture = UpdateFixture("0.0.10");
+        Equal("0.0.10", ReleaseUpdateMetadata.Parse(fixture.Json, new Version(0, 0, 9, 999))!.VersionText);
+        Check(ReleaseUpdateMetadata.Parse(fixture.Json, new Version(0, 0, 10, 123)) is null, "Same release with assembly revision");
+        Check(ReleaseUpdateMetadata.Parse(fixture.Json, new Version(0, 1, 0)) is null, "No downgrade");
+        Check(ReleaseUpdateMetadata.Parse(fixture.Json.Replace("\"draft\":false", "\"draft\":true"), new Version(0, 0, 0)) is null, "Draft ignored");
+        Check(ReleaseUpdateMetadata.Parse(fixture.Json.Replace("\"prerelease\":false", "\"prerelease\":true"), new Version(0, 0, 0)) is null, "Prerelease ignored");
+    }),
+    ("Update metadata rejects untrusted, missing, duplicate and invalid assets", () =>
+    {
+        var fixture = UpdateFixture();
+        string original = fixture.Update.InstallerUrl.AbsoluteUri;
+        foreach (string replacement in new[] {
+            original.Replace("https:", "http:"), original.Replace("github.com", "github.com.evil.test"),
+            original.Replace("osias10", "other-owner"), original.Replace("/v0.0.2/", "/v0.0.1/"),
+            original + "?download=1", original + "#fragment", original.Replace("github.com", "github.com:444"),
+            original.Replace("github.com", "attacker@github.com") })
+            RejectUpdate(() => ReleaseUpdateMetadata.Parse(fixture.Json.Replace(original, replacement), new Version(0, 0, 0)));
+        RejectUpdate(() => ReleaseUpdateMetadata.Parse(fixture.Json.Replace("SHA256SUMS.txt", "other.txt"), new Version(0, 0, 0)));
+        RejectUpdate(() => ReleaseUpdateMetadata.Parse(fixture.Json.Replace("\"state\":\"uploaded\"", "\"state\":\"open\""), new Version(0, 0, 0)));
+        RejectUpdate(() => ReleaseUpdateMetadata.Parse(fixture.Json.Replace("sha256:", "sha512:"), new Version(0, 0, 0)));
+        RejectUpdate(() => ReleaseUpdateMetadata.Parse("[]", new Version(0, 0, 0)));
+        using var json = JsonDocument.Parse(fixture.Json);
+        string duplicate = fixture.Json[..^2] + "," + json.RootElement.GetProperty("assets")[0].GetRawText() + "]}";
+        RejectUpdate(() => ReleaseUpdateMetadata.Parse(duplicate, new Version(0, 0, 0)));
+    }),
+    ("Update redirects allow only HTTPS GitHub release hosts", () =>
+    {
+        Uri original = UpdateFixture().Update.InstallerUrl;
+        Check(ReleaseUpdateMetadata.IsTrustedAssetRedirect(original, original), "Original URL");
+        Check(ReleaseUpdateMetadata.IsTrustedAssetRedirect(new Uri("https://release-assets.githubusercontent.com/asset?token=abc"), original), "Current release CDN");
+        Check(ReleaseUpdateMetadata.IsTrustedAssetRedirect(new Uri("https://objects.githubusercontent.com/asset?token=abc"), original), "Release object CDN");
+        foreach (string url in new[] { "http://release-assets.githubusercontent.com/asset", "https://release-assets.githubusercontent.com.evil.test/asset", "https://github.com/other/repo/asset", "https://raw.githubusercontent.com/asset", "https://user@objects.githubusercontent.com/asset", "https://objects.githubusercontent.com:444/asset", "https://objects.githubusercontent.com/asset#fragment" })
+            Check(!ReleaseUpdateMetadata.IsTrustedAssetRedirect(new Uri(url), original), url);
+    }),
+    ("Update checksum parser rejects missing, duplicate, malformed or conflicting checksums", () =>
+    {
+        var fixture = UpdateFixture();
+        string digest = fixture.Update.InstallerDigest!;
+        string name = fixture.Update.InstallerFileName;
+        Equal(digest, ReleaseUpdateMetadata.ReadInstallerChecksum($"\uFEFF{digest.ToUpperInvariant()} *{name}\r\n", name, digest));
+        Equal(digest, ReleaseUpdateMetadata.ReadInstallerChecksum(Encoding.UTF8.GetString(fixture.Manifest), name, null));
+        foreach (string manifest in new[] { "", $"{digest}  other.exe", $"wrong  {name}", $"{digest}  {name}\n{digest}  {name}", $"{digest}  ../{name}", $"{new string('0', 64)}  {name}" })
+            RejectUpdate(() => ReleaseUpdateMetadata.ReadInstallerChecksum(manifest, name, digest));
+    }),
+    ("Update checks cache success and rate limit failures without repeated requests", () =>
+    {
+        var fixture = UpdateFixture();
+        int requests = 0;
+        using var client = new ReleaseUpdateClient(new FakeUpdateHandler((_, _) =>
+        {
+            requests++;
+            return Task.FromResult(new HttpResponseMessage(HttpStatusCode.OK) { Content = new StringContent(fixture.Json) });
+        }));
+        Equal("0.0.2", client.CheckAsync(new Version(0, 0, 1)).GetAwaiter().GetResult()!.VersionText);
+        Equal("0.0.2", client.CheckAsync(new Version(0, 0, 1, 999)).GetAwaiter().GetResult()!.VersionText);
+        Equal(1, requests);
+        int limitedRequests = 0;
+        using var limited = new ReleaseUpdateClient(new FakeUpdateHandler((_, _) =>
+        {
+            limitedRequests++;
+            return Task.FromResult(new HttpResponseMessage(HttpStatusCode.TooManyRequests));
+        }));
+        for (int i = 0; i < 2; i++) RejectUpdate(() => limited.CheckAsync(new Version(0, 0, 1)).GetAwaiter().GetResult());
+        Equal(1, limitedRequests);
+    }),
+    ("Update check bounds metadata and never follows API redirects", () =>
+    {
+        using var oversized = new ReleaseUpdateClient(new FakeUpdateHandler((_, _) => Task.FromResult(new HttpResponseMessage(HttpStatusCode.OK)
+        { Content = new ByteArrayContent(new byte[ReleaseUpdateMetadata.MaximumMetadataSize + 1]) })));
+        RejectUpdate(() => oversized.CheckAsync(new Version(0, 0, 1)).GetAwaiter().GetResult());
+        int requests = 0;
+        using var redirected = new ReleaseUpdateClient(new FakeUpdateHandler((_, _) =>
+        {
+            requests++;
+            var response = new HttpResponseMessage(HttpStatusCode.Redirect);
+            response.Headers.Location = new Uri("https://evil.test/release");
+            return Task.FromResult(response);
+        }));
+        RejectUpdate(() => redirected.CheckAsync(new Version(0, 0, 1)).GetAwaiter().GetResult());
+        Equal(1, requests);
+    }),
+    ("Closing the app during an update check preserves cancellation without a semaphore dispose race", () =>
+    {
+        using var cancellation = new CancellationTokenSource();
+        var client = new ReleaseUpdateClient(new FakeUpdateHandler(async (_, token) =>
+        {
+            await Task.Delay(Timeout.InfiniteTimeSpan, token);
+            throw new InvalidOperationException("A cancelled request must not complete");
+        }));
+        Task<ReleaseUpdate?> check = client.CheckAsync(new Version(0, 0, 1), cancellation.Token);
+        cancellation.Cancel();
+        client.Dispose();
+        try { check.GetAwaiter().GetResult(); throw new InvalidOperationException("Expected cancellation"); }
+        catch (OperationCanceledException) { }
+    }),
+    ("Update download verifies exact bytes, atomically finalizes and rechecks before install", () => WithTemp(directory =>
+    {
+        var fixture = UpdateFixture();
+        var progress = new List<double>();
+        using var client = new ReleaseUpdateClient(UpdateDownloadHandler(fixture));
+        string path = client.DownloadAsync(fixture.Update, directory, new ImmediateProgress(progress.Add)).GetAwaiter().GetResult();
+        Check(Path.IsPathFullyQualified(path) && Path.GetFileName(path) == fixture.Update.InstallerFileName, "Exact final installer path");
+        Check(File.ReadAllBytes(path).SequenceEqual(fixture.Installer), "Verified bytes");
+        Equal(0, Directory.GetFiles(directory, "*.partial", SearchOption.AllDirectories).Length);
+        Equal(0d, progress.First());
+        Equal(100d, progress.Last());
+        Check(progress.All(x => x >= 0 && x <= 100), "Progress range");
+        client.VerifyDownloadAsync(path).GetAwaiter().GetResult();
+        File.WriteAllBytes(path, [9, 9, 9, 9]);
+        RejectUpdate(() => client.VerifyDownloadAsync(path).GetAwaiter().GetResult());
+        RejectUpdate(() => client.VerifyDownloadAsync(Path.Combine(directory, "unknown.exe")).GetAwaiter().GetResult());
+    })),
+    ("Update download supports validated CDN redirects and refuses an untrusted redirect", () => WithTemp(directory =>
+    {
+        var fixture = UpdateFixture();
+        int cdnRequests = 0;
+        using var trusted = new ReleaseUpdateClient(new FakeUpdateHandler((request, _) =>
+        {
+            if (request.RequestUri == fixture.Update.ChecksumsUrl) return Task.FromResult(new HttpResponseMessage(HttpStatusCode.OK) { Content = new ByteArrayContent(fixture.Manifest) });
+            if (request.RequestUri!.Host == "release-assets.githubusercontent.com")
+            {
+                cdnRequests++;
+                return Task.FromResult(new HttpResponseMessage(HttpStatusCode.OK) { Content = new ByteArrayContent(fixture.Installer) });
+            }
+            var response = new HttpResponseMessage(HttpStatusCode.Redirect);
+            response.Headers.Location = new Uri("https://release-assets.githubusercontent.com/test-asset?token=abc");
+            return Task.FromResult(response);
+        }));
+        Check(File.Exists(trusted.DownloadAsync(fixture.Update, directory).GetAwaiter().GetResult()), "Redirect download finished");
+        Equal(1, cdnRequests);
+        int requests = 0;
+        using var untrusted = new ReleaseUpdateClient(new FakeUpdateHandler((_, _) =>
+        {
+            requests++;
+            var response = new HttpResponseMessage(HttpStatusCode.Redirect);
+            response.Headers.Location = new Uri("https://evil.test/asset");
+            return Task.FromResult(response);
+        }));
+        RejectUpdate(() => untrusted.DownloadAsync(fixture.Update, directory).GetAwaiter().GetResult());
+        Equal(1, requests);
+    })),
+    ("Update corrupted and truncated downloads leave no executable or temporary file", () => WithTemp(directory =>
+    {
+        var fixture = UpdateFixture();
+        foreach (byte[] invalid in new byte[][] { [9, 9, 9, 9], [1, 2], [1, 2, 3, 4, 5] })
+        {
+            using var client = new ReleaseUpdateClient(UpdateDownloadHandler(fixture, invalid));
+            RejectUpdate(() => client.DownloadAsync(fixture.Update, directory).GetAwaiter().GetResult());
+            Equal(0, Directory.GetFiles(directory, "*", SearchOption.AllDirectories).Length);
+            Equal(0, Directory.GetDirectories(directory).Length);
+        }
+    })),
+    ("Update cancellation removes partial download and preserves cancellation semantics", () => WithTemp(directory =>
+    {
+        var fixture = UpdateFixture();
+        using var cancellation = new CancellationTokenSource();
+        using var client = new ReleaseUpdateClient(UpdateDownloadHandler(fixture));
+        try
+        {
+            client.DownloadAsync(fixture.Update, directory, new ImmediateProgress(value => { if (value > 0) cancellation.Cancel(); }), cancellation.Token).GetAwaiter().GetResult();
+            throw new InvalidOperationException("Cancellation was ignored");
+        }
+        catch (OperationCanceledException) { }
+        Equal(0, Directory.GetFiles(directory, "*", SearchOption.AllDirectories).Length);
+        Equal(0, Directory.GetDirectories(directory).Length);
+    })),
+    ("Update missing API digest still requires a valid published checksum", () => WithTemp(directory =>
+    {
+        var fixture = UpdateFixture();
+        string json = fixture.Json.Replace($"\"sha256:{fixture.Update.InstallerDigest}\"", "null");
+        var withoutDigest = ReleaseUpdateMetadata.Parse(json, new Version(0, 0, 0))!;
+        using var client = new ReleaseUpdateClient(UpdateDownloadHandler(fixture));
+        Check(File.Exists(client.DownloadAsync(withoutDigest, directory).GetAwaiter().GetResult()), "Manifest provides required SHA-256");
+    })),
     ("PDH skips warming-up instances when valid engine values exist", () =>
     {
         const string luid = "0x00000000_0x00000123";
@@ -507,3 +693,48 @@ static SystemSnapshot Snapshot(DateTimeOffset timestamp, double cpu = 25) => new
     new GpuSnapshot("gpu1", "GPU", Reading<double>.Ready(12), Reading<ulong>.Ready(2UL << 30), Reading<ulong>.Ready(8UL << 30), Reading<ulong>.Ready(0)),
     new NetworkSnapshot("net1", "Ethernet", Reading<double>.Ready(1000), Reading<double>.Ready(200), Reading<double>.Ready(1),
         Reading<ulong>.Ready(1_000_000_000), Reading<ulong>.Ready(1_000_000_000), "인터넷 연결"));
+
+static void RejectUpdate(Action run)
+{
+    try { run(); }
+    catch (ReleaseUpdateException) { return; }
+    throw new InvalidOperationException("Invalid update was not rejected");
+}
+
+static (ReleaseUpdate Update, byte[] Installer, byte[] Manifest, string Json) UpdateFixture(string version = "0.0.2")
+{
+    byte[] installer = [1, 2, 3, 4];
+    string digest = Convert.ToHexString(SHA256.HashData(installer)).ToLowerInvariant();
+    string installerName = $"ResourceStatus-{version}-win-x64-setup.exe";
+    byte[] manifest = Encoding.UTF8.GetBytes($"{digest}  {installerName}\n");
+    object Asset(string name, byte[] bytes) => new
+    {
+        name, state = "uploaded", size = bytes.Length,
+        browser_download_url = $"{ReleaseUpdateMetadata.RepositoryUrl}/releases/download/v{version}/{name}",
+        digest = "sha256:" + Convert.ToHexString(SHA256.HashData(bytes)).ToLowerInvariant()
+    };
+    string json = JsonSerializer.Serialize(new { tag_name = $"v{version}", draft = false, prerelease = false,
+        assets = new[] { Asset(installerName, installer), Asset("SHA256SUMS.txt", manifest) } });
+    return (ReleaseUpdateMetadata.Parse(json, new Version(0, 0, 0))!, installer, manifest, json);
+}
+
+static FakeUpdateHandler UpdateDownloadHandler((ReleaseUpdate Update, byte[] Installer, byte[] Manifest, string Json) fixture, byte[]? installer = null) =>
+    new((request, cancellationToken) =>
+    {
+        cancellationToken.ThrowIfCancellationRequested();
+        if (request.RequestUri == fixture.Update.ChecksumsUrl)
+            return Task.FromResult(new HttpResponseMessage(HttpStatusCode.OK) { Content = new ByteArrayContent(fixture.Manifest) });
+        if (request.RequestUri == fixture.Update.InstallerUrl)
+            return Task.FromResult(new HttpResponseMessage(HttpStatusCode.OK) { Content = new ByteArrayContent(installer ?? fixture.Installer) });
+        throw new InvalidOperationException("Unexpected request: " + request.RequestUri);
+    });
+
+sealed class FakeUpdateHandler(Func<HttpRequestMessage, CancellationToken, Task<HttpResponseMessage>> send) : HttpMessageHandler
+{
+    protected override Task<HttpResponseMessage> SendAsync(HttpRequestMessage request, CancellationToken cancellationToken) => send(request, cancellationToken);
+}
+
+sealed class ImmediateProgress(Action<double> report) : IProgress<double>
+{
+    public void Report(double value) => report(value);
+}

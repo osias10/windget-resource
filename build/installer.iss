@@ -54,9 +54,51 @@ Name: "{group}\ResourceStatus"; Filename: "{app}\ResourceStatus.exe"; WorkingDir
 Name: "{autodesktop}\ResourceStatus"; Filename: "{app}\ResourceStatus.exe"; WorkingDir: "{app}"; Tasks: desktopicon
 
 [Run]
-Filename: "{app}\ResourceStatus.exe"; WorkingDir: "{app}"; Description: "{cm:LaunchProgram,ResourceStatus}"; Flags: nowait postinstall skipifsilent
+Filename: "{app}\ResourceStatus.exe"; WorkingDir: "{app}"; Description: "{cm:LaunchProgram,ResourceStatus}"; Flags: nowait postinstall skipifsilent; Check: not RestartWidget
+Filename: "{app}\ResourceStatus.exe"; WorkingDir: "{app}"; Flags: nowait; Check: RestartWidget
 
 [Code]
+function OpenProcessForUpdate(Access: LongWord; Inherit: LongWord; ProcessId: LongWord): THandle;
+  external 'OpenProcess@kernel32.dll stdcall';
+function WaitForUpdateProcess(Handle: THandle; Milliseconds: LongWord): LongWord;
+  external 'WaitForSingleObject@kernel32.dll stdcall';
+function CloseUpdateHandle(Handle: THandle): Integer;
+  external 'CloseHandle@kernel32.dll stdcall';
+
+function RestartWidget: Boolean;
+begin
+  Result := ExpandConstant('{param:RESTARTWIDGET|0}') = '1';
+end;
+
+function InitializeSetup: Boolean;
+var
+  ParentId: Integer;
+  ParentHandle: THandle;
+begin
+  Result := True;
+  ParentId := StrToIntDef(ExpandConstant('{param:UPDATEPID|0}'), 0);
+  if ParentId <= 0 then Exit;
+  Log(Format('Waiting for ResourceStatus update parent %d.', [ParentId]));
+  { InitializeSetup runs before Inno checks AppMutex. The old app exits
+    normally, preserving preferences and releasing every installed DLL. }
+  ParentHandle := OpenProcessForUpdate($00100000, 0, ParentId);
+  if ParentHandle = 0 then
+  begin
+    { An already exited parent is normal; other failures must stop the update. }
+    Result := DLLGetLastError = 87;
+  end
+  else
+  begin
+    try
+      Result := WaitForUpdateProcess(ParentHandle, 30000) = 0;
+    finally
+      CloseUpdateHandle(ParentHandle);
+    end;
+  end;
+  if not Result then
+    MsgBox('ResourceStatus did not finish closing. Exit it from the system tray and run this installer again.', mbError, MB_OK);
+end;
+
 procedure CurUninstallStepChanged(CurUninstallStep: TUninstallStep);
 var
   RunCommand: String;

@@ -31,6 +31,9 @@ public sealed class AppController : IDisposable
     public event EventHandler? SettingsChanged;
     /// <summary>Appearance or mode preferences changed (saved or previewed).</summary>
     public event EventHandler? PreferencesChanged;
+    public event EventHandler? UpdateRequested;
+
+    public void RequestUpdate() => UpdateRequested?.Invoke(this, EventArgs.Empty);
 
     public AppController(string settingsPath, bool demo)
     {

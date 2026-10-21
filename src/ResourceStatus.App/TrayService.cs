@@ -27,6 +27,7 @@ internal sealed class TrayService : IDisposable
             }
             _menu.Items.Add(modes);
             Add("설정", window.ShowSettings);
+            Add("업데이트 확인", controller.RequestUpdate);
             _menu.Items.Add(new Forms.ToolStripSeparator());
             Add("종료", exit);
         };

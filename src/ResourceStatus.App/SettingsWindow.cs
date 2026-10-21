@@ -144,6 +144,17 @@ public sealed class SettingsWindow : Window
     private UIElement GeneralPanel()
     {
         var stack = new StackPanel { Margin = new Thickness(2, 20, 6, 0) };
+        var updateRow = new DockPanel { Margin = new Thickness(0, 0, 0, 22) };
+        var update = new Button { Name = "SettingsUpdateButton", Content = "업데이트 확인", Padding = new Thickness(12, 7, 12, 7) };
+        update.Click += (_, _) => _controller.RequestUpdate();
+        DockPanel.SetDock(update, Dock.Right);
+        updateRow.Children.Add(update);
+        updateRow.Children.Add(new TextBlock
+        {
+            Name = "SettingsAppVersion", Text = "Resource Status · v" + UpdateService.CurrentVersion.ToString(3),
+            VerticalAlignment = VerticalAlignment.Center, Foreground = Theme.Muted, Margin = new Thickness(0, 0, 12, 0)
+        });
+        stack.Children.Add(updateRow);
         var themeRow = new Grid { Margin = new Thickness(0, 0, 0, 8) };
         themeRow.ColumnDefinitions.Add(new ColumnDefinition { Width = new GridLength(80) });
         themeRow.ColumnDefinitions.Add(new ColumnDefinition());

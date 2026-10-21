@@ -36,6 +36,7 @@ public sealed class MainWindow : Window
     public event EventHandler? ExitRequested;
     internal FrameworkElement WidgetFrame => _frame;
     internal FrameworkElement WidgetHeader => _header;
+    internal ScrollViewer WidgetScroll => _scroll;
 
     public MainWindow(AppController controller)
     {
@@ -222,18 +223,23 @@ public sealed class MainWindow : Window
     {
         if (!_loaded) return;
         if (_sizeMove) { _forceFit = true; return; } // WM_EXITSIZEMOVE queues the deferred fit.
-        double available = Width - 10;
-        if (_scroll.Content is FrameworkElement view) view.Measure(new Size(available, double.PositiveInfinity));
-        _header.Measure(new Size(available, double.PositiveInfinity));
-        _footer.Measure(new Size(available, double.PositiveInfinity));
-        double content = (_scroll.Content as FrameworkElement)?.DesiredSize.Height ?? 40;
-        double desired = content + (_header.Visibility == Visibility.Visible ? _header.DesiredSize.Height : 0) + (_footer.Visibility == Visibility.Visible ? _footer.DesiredSize.Height : 0) + 10;
-        double height = Math.Max(44, Math.Ceiling(desired));
+        double height = MeasureDesiredHeight();
         // Steady-state ticks with unchanged content skip monitor lookup and SetWindowPos entirely.
         if (position is null && !initial && !_forceFit && height == _fittedHeight) return;
         _forceFit = false;
         _fittedHeight = height;
         WindowPlatform.FitAndPlace(this, height, position, initial);
+    }
+
+    internal double MeasureDesiredHeight()
+    {
+        // Measure the whole frame, including the actual rounded margins, border and scroll
+        // presenter. Adding a fixed 10 DIP to separately measured children loses a physical
+        // pixel at fractional DPI (for example 150%), creating a spurious vertical scrollbar.
+        _frame.UpdateLayout();
+        _frame.Measure(new Size(Width, double.PositiveInfinity));
+        var scale = VisualTreeHelper.GetDpi(_frame).DpiScaleY;
+        return Math.Ceiling(Math.Max(44, _frame.DesiredSize.Height) * scale - 1e-7) / scale;
     }
 
     public void ShowWidget()
@@ -269,6 +275,7 @@ public sealed class MainWindow : Window
         top.Click += (_, _) => { _controller.Settings.AlwaysOnTop = top.IsChecked; _controller.Save(); };
         menu.Items.Add(top);
         Add("설정", ShowSettings);
+        Add("업데이트 확인", _controller.RequestUpdate);
         menu.Items.Add(new Separator());
         Add("숨기기", Hide);
         Add("종료", () => ExitRequested?.Invoke(this, EventArgs.Empty));

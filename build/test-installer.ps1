@@ -68,6 +68,44 @@ try {
             (Get-FileHash -LiteralPath $installedFile -Algorithm SHA256).Hash) { throw "Installed payload differs: $relativePath" }
     }
 
+    # Exercise an actual update while the old executable is locked and its
+    # single-instance mutex is held. Setup must wait for that process to exit.
+    $parentScript = Join-Path $testRoot 'update-parent.ps1'
+    $parentReady = Join-Path $testRoot 'parent-ready.txt'
+    @'
+param([string]$Executable, [string]$ReadyFile)
+$ErrorActionPreference = 'Stop'
+$mutex = [Threading.Mutex]::new($true, 'Local\ResourceStatus.Widget')
+$stream = [IO.File]::Open($Executable, [IO.FileMode]::Open, [IO.FileAccess]::Read, [IO.FileShare]::Read)
+try {
+    [IO.File]::WriteAllText($ReadyFile, 'ready')
+    Start-Sleep -Seconds 8
+}
+finally { $stream.Dispose(); $mutex.ReleaseMutex(); $mutex.Dispose() }
+'@ | Set-Content -LiteralPath $parentScript -Encoding UTF8
+    $parentArguments = @('-NoProfile', '-ExecutionPolicy', 'Bypass', '-File', ('"' + $parentScript + '"'),
+        '-Executable', ('"' + (Join-Path $installDir 'ResourceStatus.exe') + '"'), '-ReadyFile', ('"' + $parentReady + '"'))
+    $parentShell = if (Test-Path -LiteralPath (Join-Path $PSHOME 'pwsh.exe')) { Join-Path $PSHOME 'pwsh.exe' } else { Join-Path $PSHOME 'powershell.exe' }
+    $parent = Start-Process -FilePath $parentShell -ArgumentList $parentArguments -WindowStyle Hidden -PassThru
+    try {
+        $deadline = [DateTime]::UtcNow.AddSeconds(10)
+        while (-not (Test-Path -LiteralPath $parentReady)) {
+            if ($parent.HasExited -or [DateTime]::UtcNow -gt $deadline) { throw 'Update parent fixture did not become ready.' }
+            Start-Sleep -Milliseconds 100
+        }
+        $updateLog = Join-Path $testRoot 'update.log'
+        Invoke-CheckedProcess -FilePath $InstallerPath -ProcessArguments @('/VERYSILENT', '/SUPPRESSMSGBOXES',
+            '/NORESTART', '/NOICONS', '/TASKS=', ('/UPDATEPID=' + $parent.Id), ('/DIR="' + $installDir + '"'), ('/LOG="' + $updateLog + '"'))
+        if (-not $parent.HasExited) { throw 'Setup did not wait for the old application to exit.' }
+        if (-not (Select-String -LiteralPath $updateLog -SimpleMatch 'Waiting for ResourceStatus update parent' -Quiet)) {
+            throw 'The setup update handoff was not exercised.'
+        }
+    }
+    finally {
+        if (-not $parent.HasExited) { Stop-Process -Id $parent.Id }
+        $parent.Dispose()
+    }
+
     $smokeOutput = Join-Path $testRoot 'smoke.json'
     Invoke-CheckedProcess -FilePath (Join-Path $installDir 'ResourceStatus.exe') -ProcessArguments @('--smoke-test',
         '--settings-dir', ('"' + (Join-Path $testRoot 'settings') + '"'), '--output', ('"' + $smokeOutput + '"'))
@@ -96,6 +134,7 @@ try {
         userPreferencesPreserved = $true
         unrelatedFilePreserved = $true
         shortcutsUnchanged = $true
+        updateWaitsForPreviousProcess = $true
         smokeReport = $smokeOutput
     } | ConvertTo-Json | Set-Content -LiteralPath $reportPath -Encoding UTF8
     Write-Host "Installer validation passed: $reportPath"

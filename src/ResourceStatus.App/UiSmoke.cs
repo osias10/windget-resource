@@ -49,6 +49,21 @@ internal static class UiSmoke
             var snapshot = controller.Current;
             var history = controller.History.Samples.ToArray();
 
+            foreach (var mode in new[] { WidgetMode.Compact, WidgetMode.Expanded })
+            {
+                window.SetMode(mode);
+                await FlushLayout();
+                var naturalHeight = window.MeasureDesiredHeight();
+                window.UpdateLayout();
+                var scroll = window.WidgetScroll;
+                var constrained = window.ActualHeight + .1 < naturalHeight;
+                Assert(constrained
+                        ? scroll.ComputedVerticalScrollBarVisibility == Visibility.Visible && scroll.ScrollableHeight > 0
+                        : scroll.ComputedVerticalScrollBarVisibility != Visibility.Visible && scroll.ScrollableHeight < .1,
+                    $"{mode}: default content only scrolls when constrained by the actual work area (height {window.ActualHeight:0.###}, natural height {naturalHeight:0.###})", checks);
+                AssertWidgetSizing(window, mode, snapshot, history, checks);
+            }
+
             // Every selectable element must render independently, with no dependency on a number or chart.
             foreach (var mode in Enum.GetValues<WidgetMode>())
             {
@@ -406,6 +421,7 @@ internal static class UiSmoke
                 && Descendants<HistoryChart>(unavailable).Count() == 1,
                 "Graph-only unsupported readings keep the status indicator", checks);
 
+            await UpdateUiSmoke.RunAsync(checks, directory);
             WriteReport(output, checks, skipped, renderingAvailable, null);
         }
         catch (Exception error)
@@ -502,6 +518,83 @@ internal static class UiSmoke
         element.Measure(new Size(width, double.PositiveInfinity));
         element.Arrange(new Rect(0, 0, width, element.DesiredSize.Height));
         element.UpdateLayout();
+    }
+
+    private static void AssertWidgetSizing(MainWindow window, WidgetMode mode, SystemSnapshot snapshot, HistorySample[] history, List<string> checks)
+    {
+        var frame = window.WidgetFrame;
+        var scroll = window.WidgetScroll;
+        var originalDpi = VisualTreeHelper.GetDpi(frame);
+        var footer = (FrameworkElement)((Grid)((Border)frame).Child).Children[2];
+        var originalHeaderVisibility = window.WidgetHeader.Visibility;
+        var originalFooterVisibility = footer.Visibility;
+        var view = (WidgetView)scroll.Content;
+        var longName = string.Concat(Enumerable.Repeat("Very long device name — 장치 이름 · ", 20));
+        var longSnapshot = snapshot with
+        {
+            Cpu = snapshot.Cpu with { Name = longName },
+            Gpu = snapshot.Gpu with { Name = longName },
+            Network = snapshot.Network with { Name = longName }
+        };
+        // This uses real WPF measure/arrange at each layout DPI, without changing the user's display.
+        // Detaching the frame avoids conflicting with the native window's actual monitor DPI.
+        window.Content = null;
+        var host = new Decorator { Child = frame, UseLayoutRounding = true, SnapsToDevicePixels = true };
+        try
+        {
+            foreach (double scale in new[] { 1d, 1.25, 1.5, 1.75, 2 })
+            {
+                VisualTreeHelper.SetRootDpi(host, new DpiScale(scale, scale));
+                foreach (var scenario in new[] { "default", "all elements and long names", "CPU number only", "all hidden" })
+                {
+                    var settings = new AppSettings();
+                    var profile = settings.DisplayProfiles.For(mode);
+                    if (scenario == "all elements and long names")
+                        foreach (var pair in profile.Items) pair.Value.Elements = DisplayCatalog.Elements(pair.Key).Select(x => x.Id).ToHashSet();
+                    if (scenario is "CPU number only" or "all hidden")
+                    {
+                        foreach (var pair in profile.Items) pair.Value.Visible = scenario == "CPU number only" && pair.Key == MetricKind.Cpu;
+                        profile.Items[MetricKind.Cpu].Elements = [ElementIds.Usage];
+                    }
+                    window.WidgetHeader.Visibility = scenario == "all hidden" ? Visibility.Collapsed : originalHeaderVisibility;
+                    footer.Visibility = scenario == "all hidden" ? Visibility.Collapsed : originalFooterVisibility;
+                    view.Refresh(settings, longSnapshot, history);
+                    host.UpdateLayout();
+                    var height = window.MeasureDesiredHeight();
+                    host.Measure(new Size(window.Width, height));
+                    host.Arrange(new Rect(0, 0, window.Width, height));
+                    host.UpdateLayout();
+                    Assert(scroll.ComputedVerticalScrollBarVisibility != Visibility.Visible && scroll.ScrollableHeight < .1,
+                        $"{mode}/{scenario}: no overflow at {scale:P0} WPF layout DPI (extent {scroll.ExtentHeight:0.###}, viewport {scroll.ViewportHeight:0.###}, height {height:0.###})", checks);
+                    if (scenario == "all elements and long names")
+                    {
+                        // A genuinely constrained viewport still scrolls, then shrinking the
+                        // profile in the next scenario must remove the bar and stale offset.
+                        host.Measure(new Size(window.Width, 120));
+                        host.Arrange(new Rect(0, 0, window.Width, 120));
+                        host.UpdateLayout();
+                        scroll.ScrollToBottom();
+                        host.UpdateLayout();
+                        Assert(scroll.ComputedVerticalScrollBarVisibility == Visibility.Visible
+                            && scroll.ExtentHeight > scroll.ViewportHeight && scroll.VerticalOffset > 0,
+                            $"{mode}: a constrained work area retains usable scrolling at {scale:P0} WPF layout DPI", checks);
+                    }
+                    if (scenario == "CPU number only")
+                        Assert(height < 150 && scroll.VerticalOffset == 0,
+                            $"{mode}: reducing content clears surplus space and scroll offset at {scale:P0} WPF layout DPI", checks);
+                }
+            }
+        }
+        finally
+        {
+            host.Child = null;
+            VisualTreeHelper.SetRootDpi(frame, originalDpi);
+            window.WidgetHeader.Visibility = originalHeaderVisibility;
+            footer.Visibility = originalFooterVisibility;
+            view.Refresh(new AppSettings(), snapshot, history);
+            window.Content = frame;
+            window.UpdateLayout();
+        }
     }
 
     private static async Task FlushLayout()
