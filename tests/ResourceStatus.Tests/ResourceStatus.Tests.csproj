@@ -1,0 +1,9 @@
+<Project Sdk="Microsoft.NET.Sdk">
+  <PropertyGroup>
+    <OutputType>Exe</OutputType>
+  </PropertyGroup>
+  <ItemGroup>
+    <ProjectReference Include="../../src/ResourceStatus.Core/ResourceStatus.Core.csproj" />
+    <Compile Include="../../src/ResourceStatus.Native/PdhSamples.cs" Link="Native/PdhSamples.cs" />
+  </ItemGroup>
+</Project>

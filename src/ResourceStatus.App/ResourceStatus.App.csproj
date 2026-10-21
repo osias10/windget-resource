@@ -1,0 +1,9 @@
+<Project Sdk="Microsoft.NET.Sdk">
+  <PropertyGroup>
+    <OutputType>WinExe</OutputType><TargetFramework>net10.0-windows</TargetFramework>
+    <UseWPF>true</UseWPF><UseWindowsForms>true</UseWindowsForms><ImplicitUsings>disable</ImplicitUsings>
+    <ApplicationManifest>app.manifest</ApplicationManifest><AssemblyName>ResourceStatus</AssemblyName>
+    <Product>Resource Status</Product><Description>Windows 시스템 상태 위젯</Description>
+  </PropertyGroup>
+  <ItemGroup><ProjectReference Include="../ResourceStatus.Core/ResourceStatus.Core.csproj" /><ProjectReference Include="../ResourceStatus.Native/ResourceStatus.Native.csproj" /></ItemGroup>
+</Project>

@@ -1,0 +1,6 @@
+<Solution>
+  <Project Path="src/ResourceStatus.Core/ResourceStatus.Core.csproj" />
+  <Project Path="src/ResourceStatus.Native/ResourceStatus.Native.csproj" />
+  <Project Path="src/ResourceStatus.App/ResourceStatus.App.csproj" />
+  <Project Path="tests/ResourceStatus.Tests/ResourceStatus.Tests.csproj" />
+</Solution>
