@@ -31,10 +31,9 @@ function Resolve-Iscc {
 }
 
 $version = [string]([xml](Get-Content -LiteralPath (Join-Path $workspaceRoot 'Directory.Build.props') -Raw)).Project.PropertyGroup.Version
-if ($version -notmatch '^\d+\.\d+\.\d+$') {
-    throw "Installer builds require a three-part numeric Version, found '$version'."
-}
-$expectedVersion = [Version]"$version.0"
+. (Join-Path $PSScriptRoot 'version.ps1')
+$versionInfo = Get-ReleaseVersionInfo -Version $version
+$expectedVersion = $versionInfo.FileVersion
 foreach ($required in @('ResourceStatus.exe', 'ResourceStatus.dll', 'ResourceStatus.runtimeconfig.json',
     'coreclr.dll', 'hostfxr.dll', 'hostpolicy.dll', 'PresentationFramework.dll')) {
     if (-not (Test-Path -LiteralPath (Join-Path $publishPath $required) -PathType Leaf)) {
@@ -46,6 +45,9 @@ $fileInfo = [Diagnostics.FileVersionInfo]::GetVersionInfo($executable)
 $actualVersion = [Version]::new($fileInfo.FileMajorPart, $fileInfo.FileMinorPart, $fileInfo.FileBuildPart, $fileInfo.FilePrivatePart)
 if ($actualVersion -ne $expectedVersion) {
     throw "Published executable version $actualVersion does not match $expectedVersion. Run build/build.ps1 before packaging."
+}
+if (($fileInfo.ProductVersion -split '\+', 2)[0] -cne $version) {
+    throw "Published executable release version does not match $version. Run build/build.ps1 before packaging."
 }
 $runtimeConfig = Get-Content -LiteralPath (Join-Path $publishPath 'ResourceStatus.runtimeconfig.json') -Raw | ConvertFrom-Json
 if ($runtimeConfig.runtimeOptions.PSObject.Properties['framework'] -or
@@ -66,7 +68,7 @@ foreach ($target in @($stagingPath, $stagedInstaller, $installerPath)) {
     }
 }
 New-Item -ItemType Directory -Path $stagingPath -Force | Out-Null
-$compilerArguments = @('/Qp', "/DAppVersion=$version", "/DPublishDir=$publishPath",
+$compilerArguments = @('/Qp', "/DAppVersion=$version", "/DAppFileVersion=$expectedVersion", "/DPublishDir=$publishPath",
     "/DInstallerOutputDir=$stagingPath", (Join-Path $PSScriptRoot 'installer.iss'))
 Write-Host "Inno Setup compiler: $compiler"
 & $compiler @compilerArguments

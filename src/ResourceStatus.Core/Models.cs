@@ -58,6 +58,9 @@ public sealed class WindowPlacement
 {
     public double Left { get; set; }
     public double Top { get; set; }
+    public string? MonitorId { get; set; }
+    public double? MonitorOffsetX { get; set; }
+    public double? MonitorOffsetY { get; set; }
 }
 
 public sealed class AppSettings
@@ -66,6 +69,9 @@ public sealed class AppSettings
     public WidgetMode WidgetMode { get; set; } = WidgetMode.Compact;
     public ThemeMode Theme { get; set; } = ThemeMode.Dark;
     public bool AlwaysOnTop { get; set; } = true;
+    public bool LockWidgetSize { get; set; }
+    public bool ClickThrough { get; set; }
+    public bool IncludePrereleaseUpdates { get; set; }
     public bool Transparency { get; set; } = true;
     public int BackgroundTransparency { get; set; } = 25;
     public bool StartWithWindows { get; set; }
@@ -73,6 +79,7 @@ public sealed class AppSettings
     public string? SelectedNetworkId { get; set; }
     public DisplayProfiles DisplayProfiles { get; set; } = new();
     public Dictionary<WidgetMode, WindowPlacement> Placements { get; set; } = [];
+    public Dictionary<WidgetMode, double> LockedHeights { get; set; } = [];
 }
 
 public sealed record DisplayElement(string Id, string Label);

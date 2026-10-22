@@ -5,6 +5,9 @@
 #ifndef PublishDir
   #error PublishDir must point to the validated self-contained publish directory.
 #endif
+#ifndef AppFileVersion
+  #error AppFileVersion must contain the numeric Windows file version.
+#endif
 #ifndef InstallerOutputDir
   #error InstallerOutputDir must be supplied by build-installer.ps1.
 #endif
@@ -18,7 +21,8 @@ AppPublisher=osias10
 AppPublisherURL=https://github.com/osias10/windget-resource
 AppSupportURL=https://github.com/osias10/windget-resource/issues
 AppUpdatesURL=https://github.com/osias10/windget-resource/releases
-VersionInfoVersion={#AppVersion}.0
+VersionInfoVersion={#AppFileVersion}
+VersionInfoTextVersion={#AppVersion}
 VersionInfoDescription=ResourceStatus Setup
 DefaultDirName={localappdata}\Programs\ResourceStatus
 DefaultGroupName=ResourceStatus

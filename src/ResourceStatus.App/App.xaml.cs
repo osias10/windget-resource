@@ -120,7 +120,7 @@ public partial class App : Application
             return;
         }
         _updateService ??= new UpdateService();
-        var window = new UpdateWindow(_updateService, _updatesDirectory);
+        var window = new UpdateWindow(_updateService, _updatesDirectory, _controller);
         _updateWindow = window;
         window.Closed += (_, _) => { if (ReferenceEquals(_updateWindow, window)) _updateWindow = null; };
         window.InstallRequested += path =>

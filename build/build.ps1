@@ -51,6 +51,8 @@ $validationPath = Assert-ArtifactPath (Join-Path $artifactRoot "validation\$runI
 $buildPath = Assert-ArtifactPath (Join-Path $artifactRoot "build\$runId")
 $previousPath = Assert-ArtifactPath (Join-Path $artifactRoot "previous-publish-$runId")
 $version = ([xml](Get-Content -LiteralPath (Join-Path $workspaceRoot 'Directory.Build.props') -Raw)).Project.PropertyGroup.Version
+. (Join-Path $PSScriptRoot 'version.ps1')
+$null = Get-ReleaseVersionInfo -Version $version
 $packagePath = Assert-ArtifactPath (Join-Path $artifactRoot "ResourceStatus-$version-win-x64.zip")
 $temporaryZip = Assert-ArtifactPath (Join-Path $artifactRoot "ResourceStatus-$version-win-x64-$runId.zip")
 

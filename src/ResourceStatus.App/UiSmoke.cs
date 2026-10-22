@@ -208,6 +208,38 @@ internal static class UiSmoke
                 "UIA general-setting toggle immediately updates the window without recursive events", checks);
             ToggleWithAutomation(alwaysOnTop);
             var transparencyToggle = Descendants<CheckBox>(generalContent).Single(c => Equals(c.Content, "반투명 배경"));
+            var sizeLock = Descendants<CheckBox>(generalContent).Single(c => Equals(c.Content, "위젯 크기 고정"));
+            var clickThrough = Descendants<CheckBox>(generalContent).Single(c => Equals(c.Content, "클릭 통과"));
+            var prereleases = Descendants<CheckBox>(generalContent).Single(c => Equals(c.Content, "프리릴리즈 업데이트 포함"));
+            Assert(!controller.Settings.LockWidgetSize && !controller.Settings.ClickThrough && !controller.Settings.IncludePrereleaseUpdates,
+                "New behavior and prerelease options are opt-in", checks);
+            ToggleWithAutomation(sizeLock);
+            ToggleWithAutomation(clickThrough);
+            ToggleWithAutomation(prereleases);
+            await FlushLayout();
+            Assert(controller.Settings.LockWidgetSize && controller.Settings.ClickThrough && controller.Settings.IncludePrereleaseUpdates,
+                "General UIA toggles enable size lock, click-through and prerelease updates", checks);
+            if (settingsArgument >= 0 && settingsArgument + 1 < launchArguments.Length)
+            {
+                var saved = new SettingsStore(Path.Combine(launchArguments[settingsArgument + 1], "settings.json")).Load();
+                Assert(saved.LockWidgetSize && saved.ClickThrough && saved.IncludePrereleaseUpdates
+                    && saved.LockedHeights.ContainsKey(controller.Settings.WidgetMode),
+                    "Behavior options and captured fixed height are persisted on the first save", checks);
+            }
+            using (var tray = new TrayService(window, controller, () => { }))
+            {
+                tray.RefreshMenu();
+                var menuClick = tray.Menu.Items.OfType<System.Windows.Forms.ToolStripMenuItem>().Single(item => item.Text == "클릭 통과");
+                var menuLock = tray.Menu.Items.OfType<System.Windows.Forms.ToolStripMenuItem>().Single(item => item.Text == "위젯 크기 고정");
+                Assert(menuClick.Checked && menuLock.Checked, "Tray menu reflects active widget behavior options", checks);
+                menuClick.PerformClick();
+                menuLock.PerformClick();
+                Assert(!controller.Settings.ClickThrough && !controller.Settings.LockWidgetSize
+                    && clickThrough.IsChecked == false && sizeLock.IsChecked == false,
+                    "Tray toggles restore interaction and automatic sizing while synchronizing open settings", checks);
+            }
+            ToggleWithAutomation(prereleases);
+            await FlushLayout();
             var transparencySlider = Descendants<Slider>(generalContent).Single(slider => slider.Name == "BackgroundTransparencySlider");
             var transparencyLabel = Descendants<TextBlock>(generalContent).Single(text => text.Name == "BackgroundTransparencyValue");
             var transparencyPeer = UIElementAutomationPeer.CreatePeerForElement(transparencySlider) ?? new SliderAutomationPeer(transparencySlider);
@@ -422,6 +454,8 @@ internal static class UiSmoke
                 "Graph-only unsupported readings keep the status indicator", checks);
 
             await UpdateUiSmoke.RunAsync(checks, directory);
+            await WindowBehaviorUiSmoke.RunAsync(checks, directory);
+            await PlacementUiSmoke.RunAsync(checks, directory);
             WriteReport(output, checks, skipped, renderingAvailable, null);
         }
         catch (Exception error)

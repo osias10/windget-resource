@@ -74,6 +74,13 @@ public static class DisplayCatalog
         if (!Enum.IsDefined(settings.WidgetMode)) settings.WidgetMode = WidgetMode.Compact;
         if (!Enum.IsDefined(settings.Theme)) settings.Theme = ThemeMode.Dark;
         settings.BackgroundTransparency = Math.Clamp(settings.BackgroundTransparency, 0, 100);
+        settings.LockedHeights ??= [];
+        foreach (var key in settings.LockedHeights.Keys.ToArray())
+        {
+            var height = settings.LockedHeights[key];
+            if (!Enum.IsDefined(key) || !double.IsFinite(height) || height < 44 || height > 16384)
+                settings.LockedHeights.Remove(key);
+        }
         settings.DisplayProfiles ??= new DisplayProfiles();
         settings.DisplayProfiles.Compact = NormalizeProfile(settings.DisplayProfiles.Compact, WidgetMode.Compact);
         settings.DisplayProfiles.Expanded = NormalizeProfile(settings.DisplayProfiles.Expanded, WidgetMode.Expanded);
@@ -81,8 +88,16 @@ public static class DisplayCatalog
         foreach (var key in settings.Placements.Keys.ToArray())
         {
             var point = settings.Placements[key];
-            if (!Enum.IsDefined(key) || point is null || !double.IsFinite(point.Left) || !double.IsFinite(point.Top))
+            if (!Enum.IsDefined(key) || point is null || !PlacementPolicy.IsValidCoordinate(point.Left) || !PlacementPolicy.IsValidCoordinate(point.Top))
                 settings.Placements.Remove(key);
+            else if (!PlacementPolicy.HasValidMonitorMetadata(point))
+            {
+                // Older settings only contain absolute coordinates. Partial or malformed
+                // monitor metadata must not discard those usable legacy coordinates.
+                point.MonitorId = null;
+                point.MonitorOffsetX = null;
+                point.MonitorOffsetY = null;
+            }
         }
         if (string.IsNullOrWhiteSpace(settings.SelectedGpuId)) settings.SelectedGpuId = null;
         if (string.IsNullOrWhiteSpace(settings.SelectedNetworkId)) settings.SelectedNetworkId = null;

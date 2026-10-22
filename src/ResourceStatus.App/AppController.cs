@@ -29,6 +29,8 @@ public sealed class AppController : IDisposable
     public event EventHandler? SnapshotUpdated;
     /// <summary>Settings were saved. Raised after <see cref="PreferencesChanged"/> for preference saves.</summary>
     public event EventHandler? SettingsChanged;
+    /// <summary>Capture window state before the settings snapshot is written.</summary>
+    public event EventHandler? SettingsSaving;
     /// <summary>Appearance or mode preferences changed (saved or previewed).</summary>
     public event EventHandler? PreferencesChanged;
     public event EventHandler? UpdateRequested;
@@ -114,6 +116,7 @@ public sealed class AppController : IDisposable
 
     public void Save(bool preferences = true)
     {
+        SettingsSaving?.Invoke(this, EventArgs.Empty);
         Volatile.Write(ref _gpuId, Settings.SelectedGpuId);
         Volatile.Write(ref _networkId, Settings.SelectedNetworkId);
         try { _store.Save(Settings); SaveError = null; }

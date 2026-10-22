@@ -151,10 +151,14 @@ public sealed class SettingsWindow : Window
         updateRow.Children.Add(update);
         updateRow.Children.Add(new TextBlock
         {
-            Name = "SettingsAppVersion", Text = "Resource Status · v" + UpdateService.CurrentVersion.ToString(3),
+            Name = "SettingsAppVersion", Text = "Resource Status · v" + UpdateService.CurrentVersionText,
+            TextTrimming = TextTrimming.CharacterEllipsis, ToolTip = "v" + UpdateService.CurrentVersionText,
             VerticalAlignment = VerticalAlignment.Center, Foreground = Theme.Muted, Margin = new Thickness(0, 0, 12, 0)
         });
         stack.Children.Add(updateRow);
+        AddCheck("프리릴리즈 업데이트 포함", _controller.Settings.IncludePrereleaseUpdates,
+            value => _controller.Settings.IncludePrereleaseUpdates = value);
+        AddHelp("켜면 베타·RC 등 시험 버전도 확인합니다. 끄면 정식 버전만 확인하며, 이전 버전으로 되돌리지는 않습니다.");
         var themeRow = new Grid { Margin = new Thickness(0, 0, 0, 8) };
         themeRow.ColumnDefinitions.Add(new ColumnDefinition { Width = new GridLength(80) });
         themeRow.ColumnDefinitions.Add(new ColumnDefinition());
@@ -182,6 +186,10 @@ public sealed class SettingsWindow : Window
             Foreground = Theme.Muted, TextWrapping = TextWrapping.Wrap, Margin = new Thickness(0, 0, 0, 24)
         });
         AddCheck("항상 위에 표시", _controller.Settings.AlwaysOnTop, value => _controller.Settings.AlwaysOnTop = value);
+        AddCheck("위젯 크기 고정", _controller.Settings.LockWidgetSize, value => _controller.Settings.LockWidgetSize = value);
+        AddHelp("현재 높이를 크기 모드별로 유지합니다. 내용이 넘치면 스크롤하며, 해제하면 높이를 자동으로 조절합니다.");
+        AddCheck("클릭 통과", _controller.Settings.ClickThrough, value => _controller.Settings.ClickThrough = value);
+        AddHelp("위젯 위에서 클릭·휠·드래그하면 뒤의 창으로 전달됩니다. 해제하려면 작업 표시줄의 트레이 아이콘을 우클릭하여 ‘클릭 통과’를 끄세요.");
         AddCheck("반투명 배경", _controller.Settings.Transparency, value => _controller.Settings.Transparency = value);
         var transparencyPanel = new StackPanel { Margin = new Thickness(22, -4, 0, 20) };
         var transparencyLabel = new DockPanel();
@@ -264,6 +272,12 @@ public sealed class SettingsWindow : Window
             stack.Children.Add(new TextBlock { Text = "데모 모드 · 자동 시작 등록을 변경하지 않습니다.", Foreground = Theme.Warning, TextWrapping = TextWrapping.Wrap, Margin = new Thickness(0, 16, 0, 0) });
         return new ScrollViewer { VerticalScrollBarVisibility = ScrollBarVisibility.Auto, Content = stack };
 
+        void AddHelp(string text) => stack.Children.Add(new TextBlock
+        {
+            Text = text, Foreground = Theme.Muted, FontSize = 11, TextWrapping = TextWrapping.Wrap,
+            Margin = new Thickness(22, -7, 0, 20), LineHeight = 18
+        });
+
         void AddCheck(string title, bool enabled, Action<bool> change)
         {
             var check = new CheckBox { Content = title, IsChecked = enabled, Margin = new Thickness(0, 0, 0, 16) };
@@ -317,6 +331,9 @@ public sealed class SettingsWindow : Window
         {
             _theme.SelectedValue = _controller.Settings.Theme;
             _generalChecks["항상 위에 표시"].IsChecked = _controller.Settings.AlwaysOnTop;
+            _generalChecks["위젯 크기 고정"].IsChecked = _controller.Settings.LockWidgetSize;
+            _generalChecks["클릭 통과"].IsChecked = _controller.Settings.ClickThrough;
+            _generalChecks["프리릴리즈 업데이트 포함"].IsChecked = _controller.Settings.IncludePrereleaseUpdates;
             _generalChecks["반투명 배경"].IsChecked = _controller.Settings.Transparency;
             _backgroundTransparency.IsEnabled = _controller.Settings.Transparency;
             _backgroundTransparency.Value = _controller.Settings.BackgroundTransparency;

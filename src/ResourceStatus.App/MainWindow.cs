@@ -29,6 +29,13 @@ public sealed class MainWindow : Window
     private readonly Button _pin;
     private WidgetMode _mode;
     private bool _loaded, _fitPending, _forceFit, _sizeMove;
+    private bool _sizeLocked, _lockedHeightSavePending;
+    private bool _placementSavePending, _closed, _suspended, _dragging, _restoreAfterDrag, _fitting;
+    private int _displayRevision, _dragDisplayRevision, _restoreAttempt;
+    private WindowPlacement? _dragOrigin;
+    private IntPtr _displayPowerNotification;
+    private readonly DispatcherTimer _placementRestoreTimer;
+    private static readonly int[] RestoreDelays = [500, 1000, 2000, 4000];
     private double _fittedHeight = double.NaN;
     private readonly SolidColorBrush _frameBackground = new();
     private SettingsWindow? _settingsWindow;
@@ -37,17 +44,22 @@ public sealed class MainWindow : Window
     internal FrameworkElement WidgetFrame => _frame;
     internal FrameworkElement WidgetHeader => _header;
     internal ScrollViewer WidgetScroll => _scroll;
+    internal bool IsPlacementRecoveryPending => _placementRestoreTimer.IsEnabled;
 
     public MainWindow(AppController controller)
     {
         _controller = controller;
+        _placementRestoreTimer = new DispatcherTimer(DispatcherPriority.Background, Dispatcher);
+        _placementRestoreTimer.Tick += RestorePlacementTick;
         _mode = controller.Settings.WidgetMode;
+        _sizeLocked = controller.Settings.LockWidgetSize;
         Title = "Resource Status";
         WindowStyle = WindowStyle.None;
         ResizeMode = ResizeMode.NoResize;
         AllowsTransparency = true;
         Background = Brushes.Transparent;
         ShowInTaskbar = false;
+        ShowActivated = !controller.Settings.ClickThrough;
         WindowStartupLocation = WindowStartupLocation.Manual;
         Width = _mode == WidgetMode.Compact ? 240 : 320;
         Height = 170;
@@ -89,10 +101,12 @@ public sealed class MainWindow : Window
         _expanded.SettingsRequested += (_, _) => ShowSettings();
         controller.SnapshotUpdated += Changed;
         controller.SettingsChanged += Changed;
+        controller.SettingsSaving += PrepareSettingsSave;
         controller.PreferencesChanged += PreferencesChanged;
         SourceInitialized += (_, _) =>
         {
             WindowPlatform.Initialize(this);
+            _displayPowerNotification = WindowPlatform.RegisterDisplayPowerNotification(this);
             HwndSource.FromHwnd(new WindowInteropHelper(this).Handle)?.AddHook(WindowMessage);
             ApplyAppearance();
         };
@@ -103,6 +117,7 @@ public sealed class MainWindow : Window
             Refresh();
             _controller.Settings.Placements.TryGetValue(_mode, out var position);
             Fit(position, true);
+            RestorePlacementAfterDisplayChange();
         };
         IsVisibleChanged += (_, _) => controller.SetVisible(IsVisible);
         PreviewKeyDown += (_, e) => { if (e.Key == Key.Escape) { Hide(); e.Handled = true; } };
@@ -110,16 +125,23 @@ public sealed class MainWindow : Window
         Closing += OnClosing;
         Closed += (_, _) =>
         {
+            _closed = true;
+            _placementRestoreTimer.Stop();
+            _placementRestoreTimer.Tick -= RestorePlacementTick;
+            WindowPlatform.UnregisterDisplayPowerNotification(_displayPowerNotification);
             controller.SnapshotUpdated -= Changed;
             controller.SettingsChanged -= Changed;
+            controller.SettingsSaving -= PrepareSettingsSave;
             controller.PreferencesChanged -= PreferencesChanged;
             Theme.Changed -= ThemeChanged;
             SystemEvents.DisplaySettingsChanged -= DisplayChanged;
             SystemEvents.PowerModeChanged -= PowerChanged;
+            SystemEvents.SessionSwitch -= SessionChanged;
             _settingsWindow?.Close();
         };
         SystemEvents.DisplaySettingsChanged += DisplayChanged;
         SystemEvents.PowerModeChanged += PowerChanged;
+        SystemEvents.SessionSwitch += SessionChanged;
         Refresh();
     }
 
@@ -134,6 +156,23 @@ public sealed class MainWindow : Window
     }
 
     private void Changed(object? sender, EventArgs e) => Refresh();
+
+    private void PrepareSettingsSave(object? sender, EventArgs e)
+    {
+        var settings = _controller.Settings;
+        if (settings.WidgetMode != _mode && !settings.Placements.ContainsKey(settings.WidgetMode)
+            && settings.Placements.TryGetValue(_mode, out var preferred))
+            settings.Placements[settings.WidgetMode] = CopyPlacement(preferred);
+        if (settings.LockWidgetSize && !_sizeLocked)
+        {
+            // Starting a new lock freezes the current visible height. Other modes acquire
+            // their own height the first time they are shown during this lock session.
+            settings.LockedHeights.Clear();
+            if (_loaded)
+                settings.LockedHeights[_mode] = Math.Clamp(ActualHeight > 0 ? ActualHeight : Height, 44, 16384);
+        }
+        _sizeLocked = settings.LockWidgetSize;
+    }
     // Saves follow this with SettingsChanged (one Refresh); previews only touch appearance.
     private void PreferencesChanged(object? sender, EventArgs e)
     {
@@ -159,24 +198,31 @@ public sealed class MainWindow : Window
     public void SetMode(WidgetMode mode)
     {
         if (_mode == mode) return;
-        SavePlacement();
         _controller.Settings.WidgetMode = mode;
         _controller.Save();
     }
 
     private void ApplyMode(WidgetMode mode)
     {
-        var current = WindowPlatform.Capture(this);
+        // A temporarily missing monitor must not make the other mode inherit the fallback HWND position.
+        if (!_controller.Settings.Placements.ContainsKey(mode)
+            && _controller.Settings.Placements.TryGetValue(_mode, out var previous))
+        {
+            _controller.Settings.Placements[mode] = CopyPlacement(previous);
+            QueuePlacementSave();
+        }
         _mode = mode;
         Width = mode == WidgetMode.Compact ? 240 : 320;
         Refresh();
         _controller.Settings.Placements.TryGetValue(mode, out var restored);
-        Fit(restored ?? current);
+        Fit(restored);
     }
 
     private void ApplyAppearance()
     {
         Topmost = _controller.Settings.AlwaysOnTop;
+        ShowActivated = !_controller.Settings.ClickThrough;
+        WindowPlatform.ApplyClickThrough(this, _controller.Settings.ClickThrough);
         WindowPlatform.ApplyTheme(this, Theme.IsDark);
         var background = Theme.Background.Color;
         var transparency = _controller.Settings.Transparency && !SystemParameters.HighContrast
@@ -197,13 +243,33 @@ public sealed class MainWindow : Window
     {
         switch (message)
         {
-            case 0x0231: _sizeMove = true; break; // WM_ENTERSIZEMOVE: never fit/clamp while the user drags.
-            case 0x0232: _sizeMove = false; QueueFit(true); break; // WM_EXITSIZEMOVE
+            case 0x0021 when _controller.Settings.ClickThrough: // WM_MOUSEACTIVATE (including active-window tracking)
+                handled = true;
+                return new IntPtr(3); // MA_NOACTIVATE
+            case 0x0231: // WM_ENTERSIZEMOVE: never restore or clamp while the user drags.
+                _sizeMove = true;
+                if (!_dragging) BeginUserMove();
+                break;
+            case 0x0232: // WM_EXITSIZEMOVE: commit the user's new anchor before any queued fit.
+                _sizeMove = false;
+                if (!_dragging) EndUserMove();
+                break;
+            case 0x0218 when WindowPlatform.IsDisplayRestoredMessage(message, wParam, lParam):
+                RestorePlacementAfterDisplayChange();
+                break;
+            case 0x007E: // WM_DISPLAYCHANGE: invalidate an interrupted drag immediately.
+                RestorePlacementAfterDisplayChange();
+                break;
+            case 0x0047 when _loaded && !_closed && !_fitting && !_sizeMove && !_dragging
+                && WindowPlatform.WasWindowMoved(lParam): // WM_WINDOWPOSCHANGED: late OS relocation.
+                RestorePlacementAfterDisplayChange();
+                break;
             case 0x031A: // WM_THEMECHANGED
                 Dispatcher.BeginInvoke(new Action(() => { Theme.RefreshSystemTheme(); ApplyAppearance(); }));
                 break;
-            case 0x001A: // WM_SETTINGCHANGE: only app color mode and high contrast affect appearance.
-                if (wParam == 0x0043) Dispatcher.BeginInvoke(new Action(ApplyAppearance)); // SPI_SETHIGHCONTRAST
+            case 0x001A: // WM_SETTINGCHANGE: work area, app color mode, or high contrast.
+                if (wParam == 0x002F) RestorePlacementAfterDisplayChange(); // SPI_SETWORKAREA (taskbar/work area).
+                else if (wParam == 0x0043) Dispatcher.BeginInvoke(new Action(ApplyAppearance)); // SPI_SETHIGHCONTRAST
                 else if (lParam != IntPtr.Zero && Marshal.PtrToStringUni(lParam) == "ImmersiveColorSet")
                     Dispatcher.BeginInvoke(new Action(() => { Theme.RefreshSystemTheme(); ApplyAppearance(); }));
                 break;
@@ -214,21 +280,49 @@ public sealed class MainWindow : Window
     private void QueueFit(bool force = false)
     {
         _forceFit |= force;
-        if (!_loaded || _fitPending) return;
+        if (!_loaded || _closed || _fitPending) return;
         _fitPending = true;
         Dispatcher.BeginInvoke(DispatcherPriority.Loaded, new Action(() => { _fitPending = false; Fit(); }));
     }
 
     private void Fit(WindowPlacement? position = null, bool initial = false)
     {
-        if (!_loaded) return;
-        if (_sizeMove) { _forceFit = true; return; } // WM_EXITSIZEMOVE queues the deferred fit.
-        double height = MeasureDesiredHeight();
+        if (!_loaded || _closed || _suspended) return;
+        if (_sizeMove || _dragging) { _forceFit = true; return; }
+        var settings = _controller.Settings;
+        bool initializePlacement = !settings.Placements.TryGetValue(_mode, out var preferred);
+        bool rememberHeight = settings.LockWidgetSize && !settings.LockedHeights.ContainsKey(_mode);
+        double height = settings.LockWidgetSize && settings.LockedHeights.TryGetValue(_mode, out var lockedHeight)
+            ? lockedHeight : MeasureDesiredHeight();
         // Steady-state ticks with unchanged content skip monitor lookup and SetWindowPos entirely.
-        if (position is null && !initial && !_forceFit && height == _fittedHeight) return;
+        if (position is null && !initial && !_forceFit && !rememberHeight && !initializePlacement && height == _fittedHeight) return;
         _forceFit = false;
         _fittedHeight = height;
-        WindowPlatform.FitAndPlace(this, height, position, initial);
+        double fittedHeight;
+        _fitting = true;
+        try { fittedHeight = WindowPlatform.FitAndPlace(this, height, position ?? preferred, initial); }
+        finally { _fitting = false; }
+        if (initializePlacement && WindowPlatform.TryCapture(this, out var firstPlacement))
+        {
+            settings.Placements[_mode] = firstPlacement;
+            QueuePlacementSave();
+        }
+        if (rememberHeight)
+        {
+            settings.LockedHeights[_mode] = Math.Clamp(fittedHeight, 44, 16384);
+            _fittedHeight = settings.LockedHeights[_mode];
+            // Mode changes can arrive inside Save's preference event. Persist the newly
+            // acquired height afterwards, rather than recursively saving from that event.
+            if (!_lockedHeightSavePending)
+            {
+                _lockedHeightSavePending = true;
+                Dispatcher.BeginInvoke(DispatcherPriority.Background, new Action(() =>
+                {
+                    _lockedHeightSavePending = false;
+                    if (PresentationSource.FromVisual(this) is not null) _controller.Save(false);
+                }));
+            }
+        }
     }
 
     internal double MeasureDesiredHeight()
@@ -274,6 +368,16 @@ public sealed class MainWindow : Window
         var top = new MenuItem { Header = "항상 위에 표시", IsCheckable = true, IsChecked = Topmost };
         top.Click += (_, _) => { _controller.Settings.AlwaysOnTop = top.IsChecked; _controller.Save(); };
         menu.Items.Add(top);
+        var locked = new MenuItem { Header = "크기 고정", IsCheckable = true, IsChecked = _controller.Settings.LockWidgetSize };
+        locked.Click += (_, _) => { _controller.Settings.LockWidgetSize = locked.IsChecked; _controller.Save(); };
+        menu.Items.Add(locked);
+        var clickThrough = new MenuItem
+        {
+            Header = "클릭 통과", IsCheckable = true, IsChecked = _controller.Settings.ClickThrough,
+            ToolTip = "켜면 위젯 아래 창을 클릭합니다. 해제하려면 트레이 아이콘의 메뉴를 사용하세요."
+        };
+        clickThrough.Click += (_, _) => { _controller.Settings.ClickThrough = clickThrough.IsChecked; _controller.Save(); };
+        menu.Items.Add(clickThrough);
         Add("설정", ShowSettings);
         Add("업데이트 확인", _controller.RequestUpdate);
         menu.Items.Add(new Separator());
@@ -288,21 +392,133 @@ public sealed class MainWindow : Window
             if (d is System.Windows.Controls.Primitives.ButtonBase || d is System.Windows.Controls.Primitives.ScrollBar) return;
         if (e.ClickCount == 2) { ShowSettings(); e.Handled = true; return; }
         if (e.LeftButton != MouseButtonState.Pressed) return;
-        try { DragMove(); SavePlacement(); }
+        BeginUserMove();
+        _dragging = true;
+        try { DragMove(); }
         catch (InvalidOperationException) { }
+        finally { _dragging = false; _sizeMove = false; EndUserMove(); }
     }
 
+    private void BeginUserMove()
+    {
+        _placementRestoreTimer.Stop();
+        _restoreAfterDrag = false;
+        _dragDisplayRevision = _displayRevision;
+        _dragOrigin = WindowPlatform.TryCapture(this, out var start) ? start : null;
+    }
+
+    private void EndUserMove()
+    {
+        if (_dragDisplayRevision == _displayRevision && _dragOrigin is not null)
+            CommitUserMove(_dragOrigin);
+        _dragOrigin = null;
+        if (_restoreAfterDrag) RestorePlacementAfterDisplayChange();
+        else QueueFit(true);
+    }
+
+    internal void CommitUserMove(WindowPlacement start)
+    {
+        if (WindowPlatform.TryCapture(this, out var end) && (start.Left != end.Left || start.Top != end.Top))
+            SavePlacement();
+    }
+
+    // Explicit user placement only. Display correction, mode changes, hiding and closing never replace it.
     internal void SavePlacement()
     {
-        if (!_loaded) return;
-        var placement = WindowPlatform.Capture(this);
+        if (!_loaded || _closed || !WindowPlatform.TryCapture(this, out var placement)) return;
         // A click without movement (or an unchanged close) must not trigger a synchronous fsync save.
         if (_controller.Settings.Placements.TryGetValue(_mode, out var saved) && saved is not null
-            && saved.Left == placement.Left && saved.Top == placement.Top) return;
+            && saved.Left == placement.Left && saved.Top == placement.Top
+            && saved.MonitorId == placement.MonitorId && saved.MonitorOffsetX == placement.MonitorOffsetX
+            && saved.MonitorOffsetY == placement.MonitorOffsetY) return;
         _controller.Settings.Placements[_mode] = placement;
         _controller.Save(false);
     }
-    private void OnClosing(object? sender, CancelEventArgs e) { SavePlacement(); if (!AllowClose) { e.Cancel = true; Hide(); } }
-    private void DisplayChanged(object? sender, EventArgs e) => Dispatcher.BeginInvoke(new Action(() => QueueFit(true)));
-    private void PowerChanged(object sender, PowerModeChangedEventArgs e) { if (e.Mode == PowerModes.Resume) _controller.ResetSampling(); }
+    private static WindowPlacement CopyPlacement(WindowPlacement position) => new()
+    {
+        Left = position.Left, Top = position.Top, MonitorId = position.MonitorId,
+        MonitorOffsetX = position.MonitorOffsetX, MonitorOffsetY = position.MonitorOffsetY
+    };
+
+    private void QueuePlacementSave()
+    {
+        if (_placementSavePending) return;
+        _placementSavePending = true;
+        Dispatcher.BeginInvoke(DispatcherPriority.Background, new Action(FlushPlacementSave));
+    }
+
+    private void FlushPlacementSave()
+    {
+        if (!_placementSavePending || _closed) return;
+        _placementSavePending = false;
+        _controller.Save(false);
+    }
+
+    private void OnClosing(object? sender, CancelEventArgs e)
+    {
+        if (_lockedHeightSavePending)
+        {
+            _lockedHeightSavePending = false;
+            _placementSavePending = true;
+        }
+        FlushPlacementSave();
+        if (!AllowClose) { e.Cancel = true; Hide(); }
+    }
+
+    internal void RestorePlacementAfterDisplayChange()
+    {
+        if (_closed) return;
+        _displayRevision++;
+        _placementRestoreTimer.Stop();
+        _restoreAttempt = 0;
+        if (_sizeMove || _dragging) { _restoreAfterDrag = true; return; }
+        _restoreAfterDrag = false;
+        if (_suspended) return;
+        _placementRestoreTimer.Interval = TimeSpan.FromMilliseconds(RestoreDelays[0]);
+        _placementRestoreTimer.Start();
+    }
+
+    private void RestorePlacementTick(object? sender, EventArgs e)
+    {
+        _placementRestoreTimer.Stop();
+        if (_closed || _suspended) return;
+        if (_sizeMove || _dragging) { _restoreAfterDrag = true; return; }
+        QueueFit(true);
+        if (++_restoreAttempt < RestoreDelays.Length)
+        {
+            _placementRestoreTimer.Interval = TimeSpan.FromMilliseconds(RestoreDelays[_restoreAttempt]);
+            _placementRestoreTimer.Start();
+        }
+    }
+
+    internal void ProcessPowerChange(PowerModes mode)
+    {
+        if (_closed) return;
+        if (mode == PowerModes.Suspend)
+        {
+            _displayRevision++;
+            _suspended = true;
+            _placementRestoreTimer.Stop();
+        }
+        else if (mode == PowerModes.Resume)
+        {
+            _suspended = false;
+            _controller.ResetSampling();
+            RestorePlacementAfterDisplayChange();
+        }
+    }
+
+    private void DispatchWindowAction(Action action)
+    {
+        if (_closed || Dispatcher.HasShutdownStarted) return;
+        Dispatcher.BeginInvoke(new Action(() => { if (!_closed) action(); }));
+    }
+
+    private void DisplayChanged(object? sender, EventArgs e) => DispatchWindowAction(RestorePlacementAfterDisplayChange);
+    private void PowerChanged(object sender, PowerModeChangedEventArgs e) => DispatchWindowAction(() => ProcessPowerChange(e.Mode));
+    private void SessionChanged(object sender, SessionSwitchEventArgs e)
+    {
+        if (e.Reason is SessionSwitchReason.SessionUnlock or SessionSwitchReason.RemoteConnect or SessionSwitchReason.ConsoleConnect)
+            DispatchWindowAction(RestorePlacementAfterDisplayChange);
+    }
 }

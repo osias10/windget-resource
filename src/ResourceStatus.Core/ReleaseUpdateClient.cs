@@ -11,10 +11,9 @@ public sealed class ReleaseUpdateClient : IDisposable
 {
     private readonly HttpClient _http;
     private readonly SemaphoreSlim _checkLock = new(1, 1);
-    private DateTimeOffset _nextCheck;
-    private Version? _checkedVersion;
-    private ReleaseUpdate? _cachedUpdate;
-    private string? _cachedError;
+    private DateTimeOffset _rateLimitedUntil;
+    private readonly Dictionary<(string Version, bool IncludePrereleases), CachedCheck> _checks = new();
+    private sealed record CachedCheck(DateTimeOffset Expires, ReleaseUpdate? Update, string? Error);
     private readonly ConcurrentDictionary<string, (long Size, string Checksum)> _verifiedDownloads = new(StringComparer.OrdinalIgnoreCase);
     private static readonly UTF8Encoding StrictUtf8 = new(false, true);
 
@@ -27,54 +26,102 @@ public sealed class ReleaseUpdateClient : IDisposable
         _http.DefaultRequestHeaders.UserAgent.ParseAdd("ResourceStatus-Updater/1.0");
     }
 
-    public async Task<ReleaseUpdate?> CheckAsync(Version currentVersion, CancellationToken cancellationToken = default)
+    public Task<ReleaseUpdate?> CheckAsync(Version currentVersion, CancellationToken cancellationToken = default) =>
+        CheckAsync(ReleaseVersion.FromVersion(currentVersion), false, cancellationToken);
+
+    public Task<ReleaseUpdate?> CheckAsync(Version currentVersion, bool includePrereleases, CancellationToken cancellationToken = default) =>
+        CheckAsync(ReleaseVersion.FromVersion(currentVersion), includePrereleases, cancellationToken);
+
+    public async Task<ReleaseUpdate?> CheckAsync(ReleaseVersion currentVersion, bool includePrereleases = false, CancellationToken cancellationToken = default)
     {
         await _checkLock.WaitAsync(cancellationToken).ConfigureAwait(false);
         using var timeout = CancellationTokenSource.CreateLinkedTokenSource(cancellationToken);
         timeout.CancelAfter(TimeSpan.FromSeconds(20));
+        var key = (currentVersion.PrecedenceText, includePrereleases);
         try
         {
-            var version = ReleaseUpdateMetadata.NormalizeVersion(currentVersion);
-            if (_checkedVersion == version && DateTimeOffset.UtcNow < _nextCheck)
+            if (_checks.TryGetValue(key, out var cached) && DateTimeOffset.UtcNow < cached.Expires)
             {
-                if (_cachedError is not null) throw new ReleaseUpdateException(_cachedError);
-                return _cachedUpdate;
+                if (cached.Error is not null) throw new ReleaseUpdateException(cached.Error);
+                return cached.Update;
             }
-            _checkedVersion = version;
-            _cachedUpdate = null;
-            _cachedError = null;
-            _nextCheck = DateTimeOffset.UtcNow.AddSeconds(30);
-            using var request = new HttpRequestMessage(HttpMethod.Get, ReleaseUpdateMetadata.LatestReleaseUrl);
-            request.Headers.Accept.Add(new MediaTypeWithQualityHeaderValue("application/vnd.github+json"));
-            request.Headers.Add("X-GitHub-Api-Version", "2026-03-10");
-            using var response = await _http.SendAsync(request, HttpCompletionOption.ResponseHeadersRead, timeout.Token).ConfigureAwait(false);
-            if (response.StatusCode == HttpStatusCode.NotFound) return null;
-            EnsureSuccess(response);
-            byte[] bytes = await ReadBoundedAsync(response, ReleaseUpdateMetadata.MaximumMetadataSize, null, timeout.Token).ConfigureAwait(false);
-            _cachedUpdate = ReleaseUpdateMetadata.Parse(StrictUtf8.GetString(bytes), version);
-            return _cachedUpdate;
+            if (DateTimeOffset.UtcNow < _rateLimitedUntil) throw new ReleaseUpdateException("GitHub 요청이 잠시 제한되었습니다. 잠시 후 다시 확인해 주세요.");
+            ReleaseUpdate? update = includePrereleases
+                ? await CheckReleaseListAsync(currentVersion, timeout.Token).ConfigureAwait(false)
+                : await CheckLatestStableAsync(currentVersion, timeout.Token).ConfigureAwait(false);
+            StoreCheck(key, update, null);
+            return update;
         }
         catch (OperationCanceledException exception) when (!cancellationToken.IsCancellationRequested)
         {
-            _cachedError = "업데이트 확인 시간이 초과되었습니다. 인터넷 연결을 확인한 뒤 다시 시도해 주세요.";
-            throw new ReleaseUpdateException(_cachedError, exception);
+            const string error = "업데이트 확인 시간이 초과되었습니다. 인터넷 연결을 확인한 뒤 다시 시도해 주세요.";
+            StoreCheck(key, null, error);
+            throw new ReleaseUpdateException(error, exception);
         }
         catch (OperationCanceledException)
         {
-            _nextCheck = DateTimeOffset.MinValue;
+            _checks.Remove(key);
             throw;
         }
         catch (ReleaseUpdateException exception)
         {
-            _cachedError = exception.Message;
+            // Do not extend an existing cached error whenever the user clicks again.
+            if (!_checks.TryGetValue(key, out var cached) || DateTimeOffset.UtcNow >= cached.Expires) StoreCheck(key, null, exception.Message);
             throw;
         }
         catch (Exception exception) when (exception is HttpRequestException or IOException or DecoderFallbackException)
         {
-            _cachedError = "GitHub에 연결할 수 없습니다. 인터넷 연결을 확인한 뒤 다시 시도해 주세요.";
-            throw new ReleaseUpdateException(_cachedError, exception);
+            const string error = "GitHub에 연결할 수 없습니다. 인터넷 연결을 확인한 뒤 다시 시도해 주세요.";
+            StoreCheck(key, null, error);
+            throw new ReleaseUpdateException(error, exception);
         }
         finally { _checkLock.Release(); }
+    }
+
+    private void StoreCheck((string Version, bool IncludePrereleases) key, ReleaseUpdate? update, string? error)
+    {
+        foreach (var expired in _checks.Where(entry => entry.Value.Expires <= DateTimeOffset.UtcNow).Select(entry => entry.Key).ToArray()) _checks.Remove(expired);
+        if (_checks.Count >= 32) _checks.Remove(_checks.MinBy(entry => entry.Value.Expires).Key);
+        DateTimeOffset expires = DateTimeOffset.UtcNow.AddSeconds(30);
+        if (error is not null && _rateLimitedUntil > expires) expires = _rateLimitedUntil;
+        _checks[key] = new CachedCheck(expires, update, error);
+    }
+
+    private async Task<ReleaseUpdate?> CheckLatestStableAsync(ReleaseVersion currentVersion, CancellationToken cancellationToken)
+    {
+        using var response = await GetReleaseMetadataAsync(ReleaseUpdateMetadata.LatestReleaseUrl, cancellationToken).ConfigureAwait(false);
+        if (response.StatusCode == HttpStatusCode.NotFound) return null;
+        EnsureSuccess(response);
+        byte[] bytes = await ReadBoundedAsync(response, ReleaseUpdateMetadata.MaximumMetadataSize, null, cancellationToken).ConfigureAwait(false);
+        return ReleaseUpdateMetadata.Parse(StrictUtf8.GetString(bytes), currentVersion);
+    }
+
+    private async Task<ReleaseUpdate?> CheckReleaseListAsync(ReleaseVersion currentVersion, CancellationToken cancellationToken)
+    {
+        ReleaseUpdateMetadata.Candidate? selected = null;
+        for (int page = 1; page <= ReleaseUpdateMetadata.MaximumReleasePages; page++)
+        {
+            // Never follow a server-supplied pagination URL; only the page number changes on the fixed repository endpoint.
+            using var response = await GetReleaseMetadataAsync($"{ReleaseUpdateMetadata.ReleasesUrl}?per_page=100&page={page}", cancellationToken).ConfigureAwait(false);
+            if (response.StatusCode == HttpStatusCode.NotFound && page == 1) return null;
+            EnsureSuccess(response);
+            byte[] bytes = await ReadBoundedAsync(response, ReleaseUpdateMetadata.MaximumMetadataSize, null, cancellationToken).ConfigureAwait(false);
+            var candidate = ReleaseUpdateMetadata.SelectListCandidate(StrictUtf8.GetString(bytes), currentVersion, includePrereleases: true);
+            if (candidate is not null && ReleaseUpdateMetadata.IsBetterCandidate(candidate, selected)) selected = candidate;
+            bool more = response.Headers.TryGetValues("Link", out var links) && links.Any(link => link.Split(',').Any(part =>
+                part.Split(';').Skip(1).Any(parameter => parameter.Trim().Equals("rel=\"next\"", StringComparison.OrdinalIgnoreCase))));
+            if (!more) return selected is null ? null : ReleaseUpdateMetadata.CreateUpdate(selected);
+        }
+        // A bounded scan must never claim an older, partially scanned release is the newest one.
+        throw new ReleaseUpdateException("릴리즈 목록이 너무 길어 최신 버전을 확인하지 못했습니다. GitHub 릴리즈 페이지에서 확인해 주세요.");
+    }
+
+    private async Task<HttpResponseMessage> GetReleaseMetadataAsync(string url, CancellationToken cancellationToken)
+    {
+        using var request = new HttpRequestMessage(HttpMethod.Get, url);
+        request.Headers.Accept.Add(new MediaTypeWithQualityHeaderValue("application/vnd.github+json"));
+        request.Headers.Add("X-GitHub-Api-Version", "2026-03-10");
+        return await _http.SendAsync(request, HttpCompletionOption.ResponseHeadersRead, cancellationToken).ConfigureAwait(false);
     }
 
     public async Task<string> DownloadAsync(ReleaseUpdate update, string directory, IProgress<double>? progress = null,
@@ -208,7 +255,7 @@ public sealed class ReleaseUpdateClient : IDisposable
                 try { retry = DateTimeOffset.FromUnixTimeSeconds(resetSeconds) - DateTimeOffset.UtcNow; }
                 catch (ArgumentOutOfRangeException) { }
             }
-            _nextCheck = DateTimeOffset.UtcNow.AddSeconds(Math.Clamp(retry?.TotalSeconds ?? 60, 30, 3600));
+            _rateLimitedUntil = DateTimeOffset.UtcNow.AddSeconds(Math.Clamp(retry?.TotalSeconds ?? 60, 30, 3600));
             throw new ReleaseUpdateException("GitHub 요청이 잠시 제한되었습니다. 잠시 후 다시 확인해 주세요.");
         }
         throw new ReleaseUpdateException($"GitHub에서 파일을 가져오지 못했습니다 (HTTP {(int)response.StatusCode}). 잠시 후 다시 시도해 주세요.");

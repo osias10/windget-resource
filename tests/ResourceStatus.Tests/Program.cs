@@ -7,6 +7,360 @@ using System.Text;
 
 var cases = new (string Name, Action Run)[]
 {
+    ("Placement selects the exact monitor identity before absolute coordinates and defaults to primary", () =>
+    {
+        MonitorWorkArea[] monitors = [new("left-monitor", -1920, 0, 1920, 1040, false), new("main-monitor", 0, 40, 1920, 1040, true)];
+        Equal("main-monitor", PlacementPolicy.SelectMonitor(null, monitors).Id);
+        Equal("left-monitor", PlacementPolicy.SelectMonitor(new WindowPlacement { Left = -1600, Top = 100 }, monitors).Id);
+        Equal("main-monitor", PlacementPolicy.SelectMonitor(new WindowPlacement { Left = 1920, Top = 100 }, monitors).Id);
+        var identified = new WindowPlacement { Left = 600, Top = 100, MonitorId = "LEFT-MONITOR", MonitorOffsetX = 75, MonitorOffsetY = 20 };
+        var resolved = PlacementPolicy.Resolve(identified, monitors, 240, 170);
+        Equal("left-monitor", resolved.Monitor.Id);
+        Equal(-1845, resolved.Left);
+        Equal(20, resolved.Top);
+        Check(!resolved.IsFallback, "Case-insensitive exact identity is authoritative");
+    }),
+    ("Monitor disconnection temporarily clamps without overwriting the position restored after reconnection", () =>
+    {
+        var main = new MonitorWorkArea("main", 0, 0, 1920, 1040, true);
+        var external = new MonitorWorkArea("external", -1920, 60, 1920, 1020, false);
+        var preferred = new WindowPlacement { Left = -1800, Top = 100, MonitorId = "external", MonitorOffsetX = 120, MonitorOffsetY = 40 };
+        string before = JsonSerializer.Serialize(preferred);
+        var fallback = PlacementPolicy.Resolve(preferred, [main], 240, 170);
+        Equal(0, fallback.Left);
+        Equal(100, fallback.Top);
+        Check(fallback.IsFallback, "Missing preferred monitor is reported as temporary fallback");
+        var restored = PlacementPolicy.Resolve(preferred, [main, external], 240, 170);
+        Equal(-1800, restored.Left);
+        Equal(100, restored.Top);
+        Check(!restored.IsFallback, "Reconnected monitor is selected again");
+        Equal(before, JsonSerializer.Serialize(preferred));
+    }),
+    ("Stable monitor identity preserves offsets when primary display and virtual desktop origin change", () =>
+    {
+        var preferred = new WindowPlacement { Left = -1720, Top = 180, MonitorId = "external", MonitorOffsetX = 200, MonitorOffsetY = 120 };
+        var newPrimary = new MonitorWorkArea("external", 0, 40, 2560, 1400, true);
+        var oldPrimary = new MonitorWorkArea("main", 2560, 0, 1920, 1040, false);
+        var restored = PlacementPolicy.Resolve(preferred, [oldPrimary, newPrimary], 320, 460);
+        Equal("external", restored.Monitor.Id);
+        Equal(200, restored.Left);
+        Equal(160, restored.Top);
+        Equal(-1720d, preferred.Left);
+        Equal(180d, preferred.Top);
+    }),
+    ("Temporary resolution and DPI size constraints never replace preferred coordinates", () =>
+    {
+        var preferred = new WindowPlacement { Left = 1500, Top = 800, MonitorId = "main", MonitorOffsetX = 1500, MonitorOffsetY = 800 };
+        var small = new MonitorWorkArea("main", 0, 0, 1280, 720, true);
+        var normal = new MonitorWorkArea("main", 0, 0, 1920, 1040, true);
+        var constrained = PlacementPolicy.Resolve(preferred, [small], 240, 200);
+        Equal(1040, constrained.Left);
+        Equal(520, constrained.Top);
+        Check(!constrained.IsFallback, "Clamping on the same monitor is not a missing-monitor fallback");
+        var scaled = PlacementPolicy.Resolve(preferred, [normal], 480, 400);
+        Equal(1440, scaled.Left);
+        Equal(640, scaled.Top);
+        var restored = PlacementPolicy.Resolve(preferred, [normal], 240, 200);
+        Equal(1500, restored.Left);
+        Equal(800, restored.Top);
+        Equal(1500d, preferred.MonitorOffsetX!.Value);
+        Equal(800d, preferred.MonitorOffsetY!.Value);
+    }),
+    ("Placement supports negative desktop origins and windows larger than their monitor", () =>
+    {
+        var monitor = new MonitorWorkArea("upper-left", -1920, -1080, 1920, 1040, false);
+        var preferred = new WindowPlacement { Left = -1900, Top = -1060, MonitorId = "upper-left", MonitorOffsetX = 20, MonitorOffsetY = 20 };
+        var ordinary = PlacementPolicy.Resolve(preferred, [monitor], 240, 170);
+        Equal(-1900, ordinary.Left);
+        Equal(-1060, ordinary.Top);
+        var oversized = PlacementPolicy.Resolve(preferred, [monitor], 3000, 2000);
+        Equal(-1920, oversized.Left);
+        Equal(-1080, oversized.Top);
+        var extreme = new MonitorWorkArea("extreme", int.MinValue, int.MinValue, 100, 100, true);
+        var offset = new WindowPlacement { MonitorId = "extreme", MonitorOffsetX = int.MaxValue, MonitorOffsetY = int.MaxValue };
+        var bounded = PlacementPolicy.Resolve(offset, [extreme], 1, 1);
+        Equal(int.MinValue + 99, bounded.Left);
+        Equal(int.MinValue + 99, bounded.Top);
+    }),
+    ("Mode-specific preferred placements and monitor offsets survive saving during a disconnect", () => WithTemp(directory =>
+    {
+        string path = Path.Combine(directory, "settings.json");
+        var settings = new AppSettings();
+        settings.Placements[WidgetMode.Compact] = new WindowPlacement { Left = -1700, Top = 150, MonitorId = "external", MonitorOffsetX = 220, MonitorOffsetY = 150 };
+        settings.Placements[WidgetMode.Expanded] = new WindowPlacement { Left = 400, Top = 300, MonitorId = "main", MonitorOffsetX = 400, MonitorOffsetY = 300 };
+        var main = new MonitorWorkArea("main", 0, 0, 1920, 1040, true);
+        var external = new MonitorWorkArea("external", -1920, 0, 1920, 1040, false);
+        var compactFallback = PlacementPolicy.Resolve(settings.Placements[WidgetMode.Compact], [main], 240, 170);
+        var expanded = PlacementPolicy.Resolve(settings.Placements[WidgetMode.Expanded], [main], 320, 460);
+        Check(compactFallback.IsFallback, "Compact falls back temporarily");
+        Check(!expanded.IsFallback && expanded.Left == 400 && expanded.Top == 300, "Expanded remains independent");
+        new SettingsStore(path).Save(settings);
+        var loaded = new SettingsStore(path).Load();
+        var restored = PlacementPolicy.Resolve(loaded.Placements[WidgetMode.Compact], [main, external], 240, 170);
+        Equal(-1700, restored.Left);
+        Equal(150, restored.Top);
+        Equal("external", loaded.Placements[WidgetMode.Compact].MonitorId);
+        Equal(220d, loaded.Placements[WidgetMode.Compact].MonitorOffsetX!.Value);
+        Equal(400d, loaded.Placements[WidgetMode.Expanded].Left);
+    })),
+    ("Legacy absolute placements migrate without monitor metadata or coordinate changes", () => WithTemp(directory =>
+    {
+        string path = Path.Combine(directory, "settings.json");
+        File.WriteAllText(path, """{"Placements":{"Compact":{"Left":-1800,"Top":65},"Expanded":{"Left":250,"Top":300}},"AlwaysOnTop":false}""");
+        var loaded = new SettingsStore(path).Load();
+        Equal(-1800d, loaded.Placements[WidgetMode.Compact].Left);
+        Equal(65d, loaded.Placements[WidgetMode.Compact].Top);
+        Check(loaded.Placements.Values.All(p => p.MonitorId is null && p.MonitorOffsetX is null && p.MonitorOffsetY is null), "Legacy metadata stays absent");
+        Check(!loaded.AlwaysOnTop, "Unrelated setting retained");
+        var monitor = new MonitorWorkArea("left", -1920, 0, 1920, 1040, false);
+        var restored = PlacementPolicy.Resolve(loaded.Placements[WidgetMode.Compact], [monitor], 240, 170);
+        Equal(-1800, restored.Left);
+        Equal(65, restored.Top);
+        Check(!restored.IsFallback, "Legacy coordinates have no missing monitor identity");
+    })),
+    ("Malformed optional monitor metadata is discarded without losing valid absolute positions", () =>
+    {
+        WindowPlacement[] malformed = [
+            new() { MonitorId = "monitor", MonitorOffsetX = 10 },
+            new() { MonitorId = "monitor", MonitorOffsetY = 10 },
+            new() { MonitorId = null, MonitorOffsetX = 10, MonitorOffsetY = 20 },
+            new() { MonitorId = " ", MonitorOffsetX = 10, MonitorOffsetY = 20 },
+            new() { MonitorId = " monitor", MonitorOffsetX = 10, MonitorOffsetY = 20 },
+            new() { MonitorId = "monitor\0", MonitorOffsetX = 10, MonitorOffsetY = 20 },
+            new() { MonitorId = new string('m', 1025), MonitorOffsetX = 10, MonitorOffsetY = 20 },
+            new() { MonitorId = "monitor", MonitorOffsetX = double.NaN, MonitorOffsetY = 20 },
+            new() { MonitorId = "monitor", MonitorOffsetX = 10, MonitorOffsetY = double.PositiveInfinity },
+            new() { MonitorId = "monitor", MonitorOffsetX = (double)int.MaxValue + 1, MonitorOffsetY = 20 }
+        ];
+        foreach (var placement in malformed)
+        {
+            placement.Left = -1700;
+            placement.Top = 80;
+            var settings = new AppSettings { Placements = { [WidgetMode.Compact] = placement } };
+            DisplayCatalog.Normalize(settings);
+            Equal(1, settings.Placements.Count);
+            Equal(-1700d, placement.Left);
+            Equal(80d, placement.Top);
+            Check(placement.MonitorId is null && placement.MonitorOffsetX is null && placement.MonitorOffsetY is null, "Only incomplete metadata is cleared");
+        }
+    }),
+    ("Out-of-range native coordinates are rejected while valid signed offsets round-trip", () => WithTemp(directory =>
+    {
+        foreach (double coordinate in new[] { double.NaN, double.PositiveInfinity, (double)int.MaxValue + 1, (double)int.MinValue - 1 })
+        {
+            var settings = new AppSettings { Placements = { [WidgetMode.Compact] = new WindowPlacement { Left = coordinate }, [WidgetMode.Expanded] = new WindowPlacement { Top = coordinate } } };
+            DisplayCatalog.Normalize(settings);
+            Equal(0, settings.Placements.Count);
+        }
+        var valid = new AppSettings { Placements = { [WidgetMode.Compact] = new WindowPlacement
+            { Left = int.MinValue, Top = int.MaxValue, MonitorId = @"\\?\DISPLAY#TEST", MonitorOffsetX = -10, MonitorOffsetY = 25 } } };
+        string path = Path.Combine(directory, "settings.json");
+        new SettingsStore(path).Save(valid);
+        var restored = new SettingsStore(path).Load().Placements[WidgetMode.Compact];
+        Equal((double)int.MinValue, restored.Left);
+        Equal((double)int.MaxValue, restored.Top);
+        Equal(@"\\?\DISPLAY#TEST", restored.MonitorId);
+        Equal(-10d, restored.MonitorOffsetX!.Value);
+        Equal(25d, restored.MonitorOffsetY!.Value);
+    })),
+    ("Semantic versions follow numeric prerelease precedence and ignore build metadata", () =>
+    {
+        string[] ordered = ["1.0.0-alpha", "1.0.0-alpha.1", "1.0.0-alpha.beta", "1.0.0-beta", "1.0.0-beta.2", "1.0.0-beta.10",
+            "1.0.0-beta.999999999999999999999999999999", "1.0.0-rc.1", "1.0.0", "1.0.1-alpha", "1.1.0", "2.0.0"];
+        for (int index = 1; index < ordered.Length; index++)
+            Check(Semantic(ordered[index]).CompareTo(Semantic(ordered[index - 1])) > 0, ordered[index]);
+        Equal(0, Semantic("0.0.3-beta.10+abc.001").CompareTo(Semantic("0.0.3-beta.10+def")));
+        Equal(Semantic("0.0.3+sha.1").GetHashCode(), Semantic("0.0.3+sha.2").GetHashCode());
+        Equal("0.0.3-beta.10", Semantic("0.0.3-beta.10+commit").PrecedenceText);
+        Equal("0.0.3-beta.10+commit", Semantic("0.0.3-beta.10+commit").Text);
+    }),
+    ("Semantic versions and installer names reject malformed or unsafe suffixes", () =>
+    {
+        foreach (string version in new[] { "0.0.3-beta.2", "0.0.3-alpha-beta.1", "0.0.3-0", "0.0.3+001.build" })
+        {
+            Check(ReleaseVersion.TryParse(version, out _), version);
+            Check(ReleaseUpdateMetadata.IsInstallerFileName($"ResourceStatus-{version}-win-x64-setup.exe"), version);
+        }
+        foreach (string version in new[] { "0.0.3-beta.02", "0.0.3-", "0.0.3-alpha..beta", "0.0.3+", "0.0.3+x+y", "0.0.3-beta/1", "0.0.3-beta\\1", "0.0.3-beta%2f1", "0.0.3-beta_1", "0.0.3-beta 1", "0.0.3-beta:1", "0.0.3-β", "00.0.3-beta", "0.0.3.0-beta", "0.0.3-" + new string('a', 129) })
+        {
+            Check(!ReleaseVersion.TryParse(version, out _), version);
+            Check(!ReleaseUpdateMetadata.IsInstallerFileName($"ResourceStatus-{version}-win-x64-setup.exe"), version);
+        }
+        Check(!ReleaseUpdateMetadata.IsInstallerFileName("ResourceStatus-0.0.3-beta.1-win-x64-setup.exe.bat"), "Executable suffix cannot be appended");
+    }),
+    ("Prereleases require opt-in even when GitHub flags and semantic suffixes disagree", () =>
+    {
+        var semanticPrerelease = UpdateFixture("0.0.3-beta.2", prerelease: false);
+        Check(ReleaseUpdateMetadata.Parse(semanticPrerelease.Json, new Version(0, 0, 2)) is null, "Suffix excluded by default");
+        var included = ReleaseUpdateMetadata.Parse(semanticPrerelease.Json, Semantic("0.0.2"), includePrereleases: true)!;
+        Check(included.IsPrerelease && included.SemanticVersion.IsPrerelease, "Suffix remains identifiable");
+        Equal("0.0.3-beta.2", included.VersionText);
+        var githubPrerelease = UpdateFixture("0.0.3", prerelease: true);
+        Check(ReleaseUpdateMetadata.Parse(githubPrerelease.Json, new Version(0, 0, 2)) is null, "GitHub prerelease flag excluded by default");
+        Check(ReleaseUpdateMetadata.Parse(githubPrerelease.Json, Semantic("0.0.2"), true)!.IsPrerelease, "Flag-only prerelease identifiable");
+        Check(ReleaseUpdateMetadata.Parse(semanticPrerelease.Json.Replace("\"draft\":false", "\"draft\":true"), Semantic("0.0.2"), true) is null, "Opt-in never includes drafts");
+    }),
+    ("A stable release replaces its prerelease without downgrading a newer prerelease", () =>
+    {
+        var stable = UpdateFixture("0.0.3");
+        Equal("0.0.3", ReleaseUpdateMetadata.Parse(stable.Json, Semantic("0.0.3-beta.10+installed"))!.VersionText);
+        Check(ReleaseUpdateMetadata.Parse(stable.Json, Semantic("0.0.4-alpha")) is null, "Turning opt-in off does not downgrade");
+        Check(ReleaseUpdateMetadata.Parse(UpdateFixture("0.0.3-beta.2").Json, Semantic("0.0.3-beta.10"), true) is null, "Numeric prerelease downgrade blocked");
+        Check(ReleaseUpdateMetadata.Parse(UpdateFixture("0.0.3-beta.10+server").Json, Semantic("0.0.3-beta.10+installed"), true) is null, "Build metadata does not create updates");
+    }),
+    ("Opt-in scans all trusted pages and selects by semantic version instead of publication order", () =>
+    {
+        var lower = UpdateFixture("0.0.3-beta.2");
+        var newest = UpdateFixture("0.0.3-beta.10");
+        var draft = UpdateFixture("9.0.0");
+        var requests = new List<Uri>();
+        using var client = new ReleaseUpdateClient(new FakeUpdateHandler((request, _) =>
+        {
+            requests.Add(request.RequestUri!);
+            bool first = request.RequestUri!.Query.EndsWith("&page=1", StringComparison.Ordinal);
+            var response = new HttpResponseMessage(HttpStatusCode.OK) { Content = new StringContent(first
+                ? "[" + lower.Json + "," + draft.Json.Replace("\"draft\":false", "\"draft\":true") + "]"
+                : "[" + newest.Json + "," + UpdateFixture("0.0.2").Json + "]") };
+            if (first) response.Headers.TryAddWithoutValidation("Link", "<https://evil.test/list?page=2>; rel=\"next\"");
+            return Task.FromResult(response);
+        }));
+        Equal("0.0.3-beta.10", client.CheckAsync(Semantic("0.0.2"), true).GetAwaiter().GetResult()!.VersionText);
+        Equal(2, requests.Count);
+        Equal(ReleaseUpdateMetadata.ReleasesUrl + "?per_page=100&page=2", requests[1].AbsoluteUri);
+        Check(requests.All(uri => uri.Host == "api.github.com"), "Untrusted pagination URL never requested");
+    }),
+    ("Stable and prerelease check caches are separated by channel and semantic identity", () =>
+    {
+        int stableRequests = 0, prereleaseRequests = 0;
+        var stable = UpdateFixture("0.0.2");
+        var prerelease = UpdateFixture("0.0.3-beta.10");
+        using var client = new ReleaseUpdateClient(new FakeUpdateHandler((request, _) =>
+        {
+            bool latest = request.RequestUri!.AbsoluteUri == ReleaseUpdateMetadata.LatestReleaseUrl;
+            if (latest) stableRequests++; else prereleaseRequests++;
+            return Task.FromResult(new HttpResponseMessage(HttpStatusCode.OK) { Content = new StringContent(latest ? stable.Json : "[" + prerelease.Json + "]") });
+        }));
+        Equal("0.0.2", client.CheckAsync(new Version(0, 0, 1)).GetAwaiter().GetResult()!.VersionText);
+        Equal("0.0.3-beta.10", client.CheckAsync(new Version(0, 0, 1), true).GetAwaiter().GetResult()!.VersionText);
+        Equal("0.0.2", client.CheckAsync(new Version(0, 0, 1), false).GetAwaiter().GetResult()!.VersionText);
+        Equal("0.0.3-beta.10", client.CheckAsync(Semantic("0.0.3-beta.2+first"), true).GetAwaiter().GetResult()!.VersionText);
+        Equal("0.0.3-beta.10", client.CheckAsync(Semantic("0.0.3-beta.2+second"), true).GetAwaiter().GetResult()!.VersionText);
+        Check(client.CheckAsync(Semantic("0.0.3-beta.10"), true).GetAwaiter().GetResult() is null, "Different installed prerelease is a distinct cache entry");
+        Equal(1, stableRequests);
+        Equal(3, prereleaseRequests);
+    }),
+    ("Release lists validate only the chosen newest assets and never silently fall back from a broken newest release", () =>
+    {
+        var newest = UpdateFixture("0.0.4-beta.1");
+        const string incompleteOld = """{"tag_name":"v0.0.3-beta.1","draft":false,"prerelease":true}""";
+        Equal("0.0.4-beta.1", ReleaseUpdateMetadata.ParseList("[" + incompleteOld + "," + newest.Json + "]", Semantic("0.0.2"), true)!.VersionText);
+        RejectUpdate(() => ReleaseUpdateMetadata.ParseList("[" + newest.Json.Replace("SHA256SUMS.txt", "missing.txt") + "," + UpdateFixture("0.0.3").Json + "]", Semantic("0.0.2"), true));
+        Equal("0.0.3", ReleaseUpdateMetadata.ParseList("[" + newest.Json + "," + UpdateFixture("0.0.3").Json + "]", Semantic("0.0.2"))!.VersionText);
+    }),
+    ("Prerelease pagination is bounded and refuses to report a partially scanned result", () =>
+    {
+        int requests = 0;
+        using var client = new ReleaseUpdateClient(new FakeUpdateHandler((_, _) =>
+        {
+            requests++;
+            var response = new HttpResponseMessage(HttpStatusCode.OK) { Content = new StringContent("[" + UpdateFixture("0.0.3-beta.1").Json + "]") };
+            response.Headers.TryAddWithoutValidation("Link", "<https://api.github.com/next>; rel=\"next\"");
+            return Task.FromResult(response);
+        }));
+        RejectUpdate(() => client.CheckAsync(Semantic("0.0.2"), true).GetAwaiter().GetResult());
+        Equal(ReleaseUpdateMetadata.MaximumReleasePages, requests);
+    }),
+    ("Switching update channels cannot bypass GitHub rate limits", () =>
+    {
+        int requests = 0;
+        using var client = new ReleaseUpdateClient(new FakeUpdateHandler((_, _) =>
+        {
+            requests++;
+            return Task.FromResult(new HttpResponseMessage(HttpStatusCode.TooManyRequests));
+        }));
+        RejectUpdate(() => client.CheckAsync(Semantic("0.0.2"), false).GetAwaiter().GetResult());
+        RejectUpdate(() => client.CheckAsync(Semantic("0.0.2"), true).GetAwaiter().GetResult());
+        Equal(1, requests);
+    }),
+    ("Canceled prerelease pagination cannot cache an incomplete result", () =>
+    {
+        using var cancellation = new CancellationTokenSource();
+        bool cancelPageTwo = true;
+        var newest = UpdateFixture("0.0.4-beta.1");
+        using var client = new ReleaseUpdateClient(new FakeUpdateHandler((request, token) =>
+        {
+            bool first = request.RequestUri!.Query.EndsWith("&page=1", StringComparison.Ordinal);
+            if (!first && cancelPageTwo) { cancelPageTwo = false; cancellation.Cancel(); token.ThrowIfCancellationRequested(); }
+            var response = new HttpResponseMessage(HttpStatusCode.OK) { Content = new StringContent("[" + (first ? UpdateFixture("0.0.3-beta.1").Json : newest.Json) + "]") };
+            if (first) response.Headers.TryAddWithoutValidation("Link", "<https://api.github.com/next>; rel=\"next\"");
+            return Task.FromResult(response);
+        }));
+        try { client.CheckAsync(Semantic("0.0.2"), true, cancellation.Token).GetAwaiter().GetResult(); throw new InvalidOperationException("Expected cancellation"); }
+        catch (OperationCanceledException) { }
+        Equal("0.0.4-beta.1", client.CheckAsync(Semantic("0.0.2"), true).GetAwaiter().GetResult()!.VersionText);
+    }),
+    ("Prerelease downloads retain exact safe names and SHA verification including build metadata", () => WithTemp(directory =>
+    {
+        foreach (string version in new[] { "0.0.3-beta.10", "0.0.3-rc.1+build.001" })
+        {
+            var fixture = UpdateFixture(version);
+            using var client = new ReleaseUpdateClient(UpdateDownloadHandler(fixture));
+            string path = client.DownloadAsync(fixture.Update, directory).GetAwaiter().GetResult();
+            Equal($"ResourceStatus-{version}-win-x64-setup.exe", Path.GetFileName(path));
+            client.VerifyDownloadAsync(path).GetAwaiter().GetResult();
+            RejectUpdate(() => ReleaseUpdateMetadata.Parse(fixture.Json.Replace("/osias10/", "/attacker/"), Semantic("0.0.2"), true));
+            RejectUpdate(() => ReleaseUpdateMetadata.ReadInstallerChecksum(Encoding.UTF8.GetString(fixture.Manifest).Replace(version, "0.0.3"), fixture.Update.InstallerFileName, fixture.Update.InstallerDigest));
+        }
+    })),
+    ("New update and interaction options default off for fresh and migrated settings", () => WithTemp(directory =>
+    {
+        var fresh = new AppSettings();
+        Check(!fresh.IncludePrereleaseUpdates && !fresh.LockWidgetSize && !fresh.ClickThrough, "Opt-in defaults are safe");
+        Equal(0, fresh.LockedHeights.Count);
+        string path = Path.Combine(directory, "settings.json");
+        File.WriteAllText(path, """{"AlwaysOnTop":false,"Theme":"Light","BackgroundTransparency":73}""");
+        var loaded = new SettingsStore(path).Load();
+        Check(!loaded.IncludePrereleaseUpdates && !loaded.LockWidgetSize && !loaded.ClickThrough, "Migration retains opt-in defaults");
+        Check(!loaded.AlwaysOnTop && loaded.Theme == ThemeMode.Light && loaded.BackgroundTransparency == 73, "Existing preferences survive migration");
+    })),
+    ("Update channel and interaction settings preserve independent saved heights across restart", () => WithTemp(directory =>
+    {
+        string path = Path.Combine(directory, "settings.json");
+        var settings = new AppSettings { IncludePrereleaseUpdates = true, LockWidgetSize = true, ClickThrough = true };
+        settings.LockedHeights[WidgetMode.Compact] = 156;
+        settings.LockedHeights[WidgetMode.Expanded] = 480;
+        new SettingsStore(path).Save(settings);
+        var loaded = new SettingsStore(path).Load();
+        Check(loaded.IncludePrereleaseUpdates && loaded.LockWidgetSize && loaded.ClickThrough, "Enabled options survive restart");
+        Equal(156d, loaded.LockedHeights[WidgetMode.Compact]);
+        Equal(480d, loaded.LockedHeights[WidgetMode.Expanded]);
+        loaded.LockWidgetSize = loaded.ClickThrough = loaded.IncludePrereleaseUpdates = false;
+        new SettingsStore(path).Save(loaded);
+        var disabled = new SettingsStore(path).Load();
+        Check(!disabled.IncludePrereleaseUpdates && !disabled.LockWidgetSize && !disabled.ClickThrough, "Disabled choices survive restart");
+        Equal(156d, disabled.LockedHeights[WidgetMode.Compact]);
+        Equal(480d, disabled.LockedHeights[WidgetMode.Expanded]);
+    })),
+    ("Locked height normalization rejects unsafe heights and unknown modes without changing options", () =>
+    {
+        foreach (double height in new[] { double.NaN, double.PositiveInfinity, double.NegativeInfinity, -1, 0, 43.99, 16384.01 })
+        {
+            var settings = new AppSettings { LockWidgetSize = true, ClickThrough = true, IncludePrereleaseUpdates = true };
+            settings.LockedHeights[WidgetMode.Compact] = height;
+            settings.LockedHeights[WidgetMode.Expanded] = 480;
+            settings.LockedHeights[(WidgetMode)99] = 156;
+            DisplayCatalog.Normalize(settings);
+            Equal(1, settings.LockedHeights.Count);
+            Equal(480d, settings.LockedHeights[WidgetMode.Expanded]);
+            Check(settings.LockWidgetSize && settings.ClickThrough && settings.IncludePrereleaseUpdates, "Unrelated options are retained");
+        }
+        var limits = new AppSettings { LockedHeights = new() { [WidgetMode.Compact] = 44, [WidgetMode.Expanded] = 16384 } };
+        DisplayCatalog.Normalize(limits);
+        Equal(2, limits.LockedHeights.Count);
+        limits.LockedHeights = null!;
+        DisplayCatalog.Normalize(limits);
+        Equal(0, limits.LockedHeights.Count);
+    }),
     ("Update tags require stable canonical numeric versions", () =>
     {
         foreach (string tag in new[] { "v0.0.2", "v1.10.0", "v12.0.123" })
@@ -701,7 +1055,13 @@ static void RejectUpdate(Action run)
     throw new InvalidOperationException("Invalid update was not rejected");
 }
 
-static (ReleaseUpdate Update, byte[] Installer, byte[] Manifest, string Json) UpdateFixture(string version = "0.0.2")
+static ReleaseVersion Semantic(string version)
+{
+    if (!ReleaseVersion.TryParse(version, out var parsed)) throw new InvalidOperationException("Invalid fixture version: " + version);
+    return parsed;
+}
+
+static (ReleaseUpdate Update, byte[] Installer, byte[] Manifest, string Json) UpdateFixture(string version = "0.0.2", bool? prerelease = null)
 {
     byte[] installer = [1, 2, 3, 4];
     string digest = Convert.ToHexString(SHA256.HashData(installer)).ToLowerInvariant();
@@ -713,9 +1073,9 @@ static (ReleaseUpdate Update, byte[] Installer, byte[] Manifest, string Json) Up
         browser_download_url = $"{ReleaseUpdateMetadata.RepositoryUrl}/releases/download/v{version}/{name}",
         digest = "sha256:" + Convert.ToHexString(SHA256.HashData(bytes)).ToLowerInvariant()
     };
-    string json = JsonSerializer.Serialize(new { tag_name = $"v{version}", draft = false, prerelease = false,
+    string json = JsonSerializer.Serialize(new { tag_name = $"v{version}", draft = false, prerelease = prerelease ?? Semantic(version).IsPrerelease,
         assets = new[] { Asset(installerName, installer), Asset("SHA256SUMS.txt", manifest) } });
-    return (ReleaseUpdateMetadata.Parse(json, new Version(0, 0, 0))!, installer, manifest, json);
+    return (ReleaseUpdateMetadata.Parse(json, new Version(0, 0, 0), includePrereleases: true)!, installer, manifest, json);
 }
 
 static FakeUpdateHandler UpdateDownloadHandler((ReleaseUpdate Update, byte[] Installer, byte[] Manifest, string Json) fixture, byte[]? installer = null) =>

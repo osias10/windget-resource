@@ -16,6 +16,8 @@ public sealed class UpdateWindow : Window
 {
     private readonly IUpdateService _service;
     private readonly string _downloadDirectory;
+    private readonly AppController? _controller;
+    private readonly CheckBox _prereleases = new() { Name = "UpdatePrereleaseOption", Content = "프리릴리즈 업데이트 포함" };
     private readonly TextBlock _latest = new() { Name = "AvailableUpdateVersion", Text = "아직 확인하지 않음" };
     private readonly TextBlock _status = new() { Name = "UpdateStatus", Text = "업데이트 확인을 누르면 새 버전을 확인합니다." };
     private readonly TextBlock _progressText = new() { Name = "UpdateProgressText" };
@@ -28,17 +30,24 @@ public sealed class UpdateWindow : Window
     private ReleaseUpdate? _available;
     private string? _downloadedInstaller;
     private bool _closed, _installing;
+    private bool _includePrereleases, _syncingChannel;
+    private int _channelGeneration;
 
     public event Action<string>? InstallRequested;
     internal bool IsBusy => _operation is not null || _installing;
     internal string StatusText => _status.Text;
     internal string ActionText => (string)_action.Content;
     internal bool CanInstall => _downloadedInstaller is not null && !IsBusy;
+    internal CheckBox PrereleaseOption => _prereleases;
+    internal string AvailableVersionText => _latest.Text;
+    internal bool CanDownload => _available is not null && !IsBusy;
 
-    public UpdateWindow(IUpdateService service, string downloadDirectory)
+    public UpdateWindow(IUpdateService service, string downloadDirectory, AppController? controller = null)
     {
         _service = service;
         _downloadDirectory = downloadDirectory;
+        _controller = controller;
+        _includePrereleases = controller?.Settings.IncludePrereleaseUpdates ?? false;
         Title = "Resource Status 업데이트";
         Width = 480;
         SizeToContent = SizeToContent.Height;
@@ -55,7 +64,17 @@ public sealed class UpdateWindow : Window
         root.Children.Add(new TextBlock
         {
             Text = "GitHub 릴리즈에서 새 버전을 확인합니다.", Foreground = Theme.Muted,
-            Margin = new Thickness(0, 7, 0, 20), TextWrapping = TextWrapping.Wrap
+            Margin = new Thickness(0, 7, 0, 16), TextWrapping = TextWrapping.Wrap
+        });
+        _prereleases.IsChecked = _includePrereleases;
+        _prereleases.Checked += OnPrereleaseOptionChanged;
+        _prereleases.Unchecked += OnPrereleaseOptionChanged;
+        root.Children.Add(_prereleases);
+        root.Children.Add(new TextBlock
+        {
+            Text = "기본은 정식 릴리즈만 확인합니다. 프리릴리즈를 포함하면 개발 중인 버전도 받을 수 있습니다.",
+            Foreground = Theme.Muted, FontSize = 11, TextWrapping = TextWrapping.Wrap,
+            Margin = new Thickness(21, 6, 0, 20)
         });
         var versions = new Grid { Margin = new Thickness(14) };
         versions.ColumnDefinitions.Add(new ColumnDefinition { Width = new GridLength(90) });
@@ -63,7 +82,7 @@ public sealed class UpdateWindow : Window
         versions.RowDefinitions.Add(new RowDefinition { Height = GridLength.Auto });
         versions.RowDefinitions.Add(new RowDefinition { Height = GridLength.Auto });
         versions.Children.Add(new TextBlock { Text = "현재 버전", Foreground = Theme.Muted });
-        var current = new TextBlock { Name = "CurrentUpdateVersion", Text = "v" + UpdateService.CurrentVersion.ToString(3) };
+        var current = new TextBlock { Name = "CurrentUpdateVersion", Text = "v" + UpdateService.CurrentVersionText, TextWrapping = TextWrapping.Wrap };
         Grid.SetColumn(current, 1); versions.Children.Add(current);
         var availableLabel = new TextBlock { Text = "새 버전", Foreground = Theme.Muted, Margin = new Thickness(0, 10, 0, 0) };
         Grid.SetRow(availableLabel, 1); versions.Children.Add(availableLabel);
@@ -109,12 +128,14 @@ public sealed class UpdateWindow : Window
         Content = root;
         SourceInitialized += (_, _) => WindowPlatform.ApplyTheme(this, Theme.IsDark);
         Theme.Changed += OnThemeChanged;
+        if (_controller is not null) _controller.SettingsChanged += OnSettingsChanged;
         PreviewKeyDown += (_, args) => { if (args.Key == Key.Escape) { Close(); args.Handled = true; } };
         Closed += (_, _) =>
         {
             _closed = true;
             _operation?.Cancel();
             Theme.Changed -= OnThemeChanged;
+            if (_controller is not null) _controller.SettingsChanged -= OnSettingsChanged;
         };
     }
 
@@ -122,6 +143,8 @@ public sealed class UpdateWindow : Window
     {
         if (_closed || IsBusy) return;
         var operation = _operation = new CancellationTokenSource();
+        int channel = _channelGeneration;
+        bool includePrereleases = _includePrereleases;
         _available = null;
         _downloadedInstaller = null;
         _latest.Text = "확인 중…";
@@ -130,21 +153,21 @@ public sealed class UpdateWindow : Window
         UpdateButtons();
         try
         {
-            var update = await _service.CheckAsync(UpdateService.CurrentVersion, operation.Token);
+            var update = await _service.CheckAsync(UpdateService.CurrentReleaseVersion, includePrereleases, operation.Token);
             operation.Token.ThrowIfCancellationRequested();
-            if (_closed) return;
+            if (_closed || channel != _channelGeneration) return;
             _available = update;
-            _latest.Text = update is null ? "업데이트 없음" : "v" + update.VersionText;
-            SetStatus(update is null ? "현재 최신 버전을 사용하고 있습니다."
+            _latest.Text = update is null ? "업데이트 없음" : $"v{update.VersionText} · {(update.IsPrerelease ? "프리릴리즈" : "정식 릴리즈")}";
+            SetStatus(update is null ? "선택한 채널에 현재 버전보다 새로운 업데이트가 없습니다."
                 : $"새 버전을 사용할 수 있습니다. 다운로드 크기: {update.InstallerSize / (1024d * 1024):F1} MB");
         }
         catch (OperationCanceledException)
         {
-            if (!_closed) { _latest.Text = "확인하지 못함"; SetStatus(operation.IsCancellationRequested ? "업데이트 확인을 취소했습니다." : "연결 시간이 초과되었습니다. 다시 확인해 주세요."); }
+            if (!_closed && channel == _channelGeneration) { _latest.Text = "확인하지 못함"; SetStatus(operation.IsCancellationRequested ? "업데이트 확인을 취소했습니다." : "연결 시간이 초과되었습니다. 다시 확인해 주세요."); }
         }
         catch (Exception error)
         {
-            if (!_closed) { _latest.Text = "확인하지 못함"; SetStatus(ErrorMessage(error), true); }
+            if (!_closed && channel == _channelGeneration) { _latest.Text = "확인하지 못함"; SetStatus(ErrorMessage(error), true); }
         }
         finally
         {
@@ -157,6 +180,7 @@ public sealed class UpdateWindow : Window
     internal async Task DownloadOrInstallAsync()
     {
         if (_closed || IsBusy || _available is null) return;
+        int channel = _channelGeneration;
         if (_downloadedInstaller is { } installer)
         {
             var verification = _operation = new CancellationTokenSource();
@@ -168,7 +192,7 @@ public sealed class UpdateWindow : Window
             {
                 await _service.VerifyDownloadAsync(installer, verification.Token);
                 verification.Token.ThrowIfCancellationRequested();
-                if (_closed) return;
+                if (_closed || channel != _channelGeneration) return;
                 verified = true;
                 SetStatus("설치 프로그램을 시작하고 있습니다.");
                 if (InstallRequested is null) throw new InvalidOperationException("Installer handoff is unavailable.");
@@ -177,12 +201,16 @@ public sealed class UpdateWindow : Window
             catch (OperationCanceledException)
             {
                 _installing = false;
-                if (!_closed) SetStatus("설치를 취소했습니다. 준비된 파일로 다시 시도할 수 있습니다.");
+                if (!_closed && channel == _channelGeneration) SetStatus("설치를 취소했습니다. 준비된 파일로 다시 시도할 수 있습니다.");
             }
             catch (Exception error)
             {
-                if (!verified) _downloadedInstaller = null;
-                ShowInstallError(verified ? "설치 프로그램을 시작하지 못했습니다. 다시 시도해 주세요." : ErrorMessage(error));
+                _installing = false;
+                if (channel == _channelGeneration)
+                {
+                    if (!verified) _downloadedInstaller = null;
+                    ShowInstallError(verified ? "설치 프로그램을 시작하지 못했습니다. 다시 시도해 주세요." : ErrorMessage(error));
+                }
             }
             finally
             {
@@ -201,7 +229,7 @@ public sealed class UpdateWindow : Window
         UpdateButtons();
         var progress = new Progress<double>(value =>
         {
-            if (_closed || !ReferenceEquals(_operation, operation) || operation.IsCancellationRequested) return;
+            if (_closed || channel != _channelGeneration || !ReferenceEquals(_operation, operation) || operation.IsCancellationRequested) return;
             _progress.Value = double.IsFinite(value) ? Math.Clamp(value, 0, 100) : 0;
             _progressText.Text = $"{_progress.Value:F0}%";
             if (_progress.Value >= 100) SetStatus("다운로드한 파일을 확인하고 있습니다.");
@@ -210,7 +238,7 @@ public sealed class UpdateWindow : Window
         {
             string downloadPath = await _service.DownloadAsync(_available, _downloadDirectory, progress, operation.Token);
             operation.Token.ThrowIfCancellationRequested();
-            if (_closed) return;
+            if (_closed || channel != _channelGeneration) return;
             _downloadedInstaller = downloadPath;
             _progress.Value = 100;
             _progressText.Text = "다운로드 및 파일 확인 완료";
@@ -218,11 +246,11 @@ public sealed class UpdateWindow : Window
         }
         catch (OperationCanceledException)
         {
-            if (!_closed) { _progressPanel.Visibility = Visibility.Collapsed; SetStatus(operation.IsCancellationRequested ? "다운로드를 취소했습니다. 다시 다운로드할 수 있습니다." : "연결 시간이 초과되었습니다. 다시 다운로드해 주세요."); }
+            if (!_closed && channel == _channelGeneration) { _progressPanel.Visibility = Visibility.Collapsed; SetStatus(operation.IsCancellationRequested ? "다운로드를 취소했습니다. 다시 다운로드할 수 있습니다." : "연결 시간이 초과되었습니다. 다시 다운로드해 주세요."); }
         }
         catch (Exception error)
         {
-            if (!_closed) { _progressPanel.Visibility = Visibility.Collapsed; SetStatus(ErrorMessage(error), true); }
+            if (!_closed && channel == _channelGeneration) { _progressPanel.Visibility = Visibility.Collapsed; SetStatus(ErrorMessage(error), true); }
         }
         finally
         {
@@ -250,12 +278,48 @@ public sealed class UpdateWindow : Window
 
     private void UpdateButtons()
     {
+        _prereleases.IsEnabled = !IsBusy;
         _check.IsEnabled = !IsBusy;
         _action.IsEnabled = !IsBusy;
         _action.Visibility = _available is null ? Visibility.Collapsed : Visibility.Visible;
         _action.Content = _downloadedInstaller is null ? "다운로드" : "설치하고 다시 시작";
         _cancel.Visibility = _operation is null ? Visibility.Collapsed : Visibility.Visible;
         _cancel.IsEnabled = _operation is not null && !_operation.IsCancellationRequested;
+    }
+
+    private void OnPrereleaseOptionChanged(object sender, RoutedEventArgs e)
+    {
+        if (_syncingChannel) return;
+        ChangeChannel(_prereleases.IsChecked == true);
+        if (_controller is not null)
+        {
+            _controller.Settings.IncludePrereleaseUpdates = _includePrereleases;
+            _controller.Save();
+            if (_controller.SaveError is { } error) SetStatus(error, true);
+        }
+    }
+
+    private void OnSettingsChanged(object? sender, EventArgs e)
+    {
+        if (_controller is not null && !_closed) ChangeChannel(_controller.Settings.IncludePrereleaseUpdates);
+    }
+
+    private void ChangeChannel(bool includePrereleases)
+    {
+        if (_includePrereleases == includePrereleases) return;
+        _includePrereleases = includePrereleases;
+        _channelGeneration++;
+        _operation?.Cancel();
+        _available = null;
+        _downloadedInstaller = null;
+        _installing = false;
+        _syncingChannel = true;
+        try { _prereleases.IsChecked = includePrereleases; }
+        finally { _syncingChannel = false; }
+        _latest.Text = "다시 확인 필요";
+        _progressPanel.Visibility = Visibility.Collapsed;
+        SetStatus("업데이트 채널을 변경했습니다. 업데이트 확인을 눌러 다시 확인하세요.");
+        UpdateButtons();
     }
 
     private void SetStatus(string message, bool error = false)
