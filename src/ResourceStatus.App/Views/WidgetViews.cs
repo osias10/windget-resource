@@ -25,6 +25,7 @@ public abstract class WidgetView : UserControl
     private readonly WidgetMode _mode;
     private readonly StackPanel _content = new();
     private readonly Dictionary<MetricKind, MetricRow> _rows = new();
+    private readonly UsageColorTimeline _localColors = new();
     private string? _configuration;
     public event EventHandler? SettingsRequested;
 
@@ -39,8 +40,13 @@ public abstract class WidgetView : UserControl
         Content = _content;
     }
 
-    public void Refresh(AppSettings settings, SystemSnapshot snapshot, IReadOnlyList<HistorySample> history)
+    public void Refresh(AppSettings settings, SystemSnapshot snapshot, IReadOnlyList<HistorySample> history, UsageColorTimeline? colors = null)
     {
+        if (colors is null)
+        {
+            colors = _localColors;
+            colors.Update(history, settings.UsageColors);
+        }
         var profile = settings.DisplayProfiles.For(_mode);
         var configuration = string.Join("|", Enum.GetValues<MetricKind>().Select(kind =>
             profile.Items.TryGetValue(kind, out var item)
@@ -50,7 +56,7 @@ public abstract class WidgetView : UserControl
             _configuration = configuration;
             Rebuild(profile);
         }
-        foreach (var row in _rows.Values) row.Update(snapshot, history);
+        foreach (var row in _rows.Values) row.Update(snapshot, history, colors, settings.UsageColors[row.Kind]);
     }
 
     private void Rebuild(DisplayProfile profile)
@@ -94,6 +100,7 @@ public abstract class WidgetView : UserControl
         private readonly TextBlock? _memory;
         private readonly TextBlock? _dedicated;
         private readonly TextBlock? _links;
+        public MetricKind Kind => _kind;
 
         public MetricRow(MetricKind kind, MetricDisplayOptions options, bool compact, bool separator)
         {
@@ -217,7 +224,7 @@ public abstract class WidgetView : UserControl
             return block;
         }
 
-        public void Update(SystemSnapshot snapshot, IReadOnlyList<HistorySample> history)
+        public void Update(SystemSnapshot snapshot, IReadOnlyList<HistorySample> history, UsageColorTimeline colors, UsageColorOptions colorOptions)
         {
             var reading = _kind switch
             {
@@ -227,8 +234,20 @@ public abstract class WidgetView : UserControl
                 _ => snapshot.Network.LinkUsage
             };
             Set(ElementIds.Usage, Formatting.Percent(reading), _kind == MetricKind.Network ? "수신·송신 각각의 링크 속도 대비 비율 중 큰 값" : "전체 사용률");
-            _gauge?.Update(reading.IsReady ? reading.Value : null);
-            _chart?.Update(history, snapshot.Timestamp, _kind == MetricKind.Gpu ? snapshot.Gpu.DeviceId : snapshot.Network.DeviceId);
+            var level = reading.IsReady && colorOptions.Enabled ? colors.GetLevel(_kind, snapshot.Timestamp) : UsageSeverity.Normal;
+            Brush Color(Brush normal) => level switch
+            {
+                UsageSeverity.Warning => Theme.UsageWarning,
+                UsageSeverity.Critical => Theme.UsageCritical,
+                _ => normal
+            };
+            if (_values.TryGetValue(ElementIds.Usage, out var percentage)) percentage.Foreground = Color(Theme.Text);
+            if (_values.TryGetValue(ElementIds.Download, out var down))
+                down.Foreground = snapshot.Network.DownloadBytesPerSecond.IsReady ? Color(Theme.Download) : Theme.Download;
+            if (_values.TryGetValue(ElementIds.Upload, out var up))
+                up.Foreground = snapshot.Network.UploadBytesPerSecond.IsReady ? Color(Theme.Upload) : Theme.Upload;
+            _gauge?.Update(reading.IsReady ? reading.Value : null, Color(Accent));
+            _chart?.Update(history, snapshot.Timestamp, _kind == MetricKind.Gpu ? snapshot.Gpu.DeviceId : snapshot.Network.DeviceId, colors, colorOptions);
 
             switch (_kind)
             {

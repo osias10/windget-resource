@@ -19,6 +19,7 @@ public sealed class AppController : IDisposable
     private string? _gpuId, _networkId;
     public AppSettings Settings { get; }
     public HistoryBuffer History { get; } = new();
+    public UsageColorTimeline UsageColors { get; } = new();
     public SystemSnapshot Current { get; private set; } = EmptySnapshot();
     public IReadOnlyList<DeviceOption> Gpus { get; private set; } = [];
     public IReadOnlyList<DeviceOption> Networks { get; private set; } = [];
@@ -73,6 +74,7 @@ public sealed class AppController : IDisposable
                             if (!SameDevices(Networks, networks)) Networks = networks;
                             CollectionError = null;
                             History.Add(sample);
+                            UsageColors.Update(History.Samples, Settings.UsageColors);
                             SnapshotUpdated?.Invoke(this, EventArgs.Empty);
                         });
                     }
@@ -83,6 +85,7 @@ public sealed class AppController : IDisposable
                             CollectionError = ex.Message;
                             Current = EmptySnapshot(ReadingState.Error, "측정 중 오류가 발생했습니다. 다음 갱신에서 다시 시도합니다.");
                             History.Add(Current);
+                            UsageColors.Update(History.Samples, Settings.UsageColors);
                             SnapshotUpdated?.Invoke(this, EventArgs.Empty);
                         });
                     }
@@ -112,7 +115,11 @@ public sealed class AppController : IDisposable
     public void ResetSampling() => Interlocked.Exchange(ref _reset, 1);
 
     /// <summary>Preview appearance while a continuously changing control defers its disk write.</summary>
-    public void PreviewPreferences() => PreferencesChanged?.Invoke(this, EventArgs.Empty);
+    public void PreviewPreferences()
+    {
+        UsageColors.Update(History.Samples, Settings.UsageColors);
+        PreferencesChanged?.Invoke(this, EventArgs.Empty);
+    }
 
     public void Save(bool preferences = true)
     {
@@ -122,7 +129,7 @@ public sealed class AppController : IDisposable
         try { _store.Save(Settings); SaveError = null; }
         catch (Exception ex) when (ex is IOException or UnauthorizedAccessException)
         { SaveError = "설정을 저장하지 못했습니다: " + ex.Message; }
-        if (preferences) PreferencesChanged?.Invoke(this, EventArgs.Empty);
+        if (preferences) PreviewPreferences();
         SettingsChanged?.Invoke(this, EventArgs.Empty);
     }
 

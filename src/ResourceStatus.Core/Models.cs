@@ -4,6 +4,7 @@ public enum WidgetMode { Compact, Expanded }
 public enum ThemeMode { Dark, Light, System }
 public enum MetricKind { Cpu, Ram, Gpu, Network }
 public enum ReadingState { Ready, WarmingUp, Unsupported, AccessDenied, Error }
+public enum UsageSeverity { Normal, Warning, Critical }
 
 public readonly record struct Reading<T>(T? Value, ReadingState State, string? Detail = null) where T : struct
 {
@@ -24,7 +25,7 @@ public sealed record SystemSnapshot(DateTimeOffset Timestamp, CpuSnapshot Cpu, R
     GpuSnapshot Gpu, NetworkSnapshot Network);
 
 public sealed record HistorySample(DateTimeOffset Timestamp, double? Cpu, double? Ram,
-    double? Gpu, double? Download, double? Upload, string? GpuId, string? NetworkId);
+    double? Gpu, double? Download, double? Upload, string? GpuId, string? NetworkId, double? LinkUsage = null);
 
 public static class ElementIds
 {
@@ -63,6 +64,13 @@ public sealed class WindowPlacement
     public double? MonitorOffsetY { get; set; }
 }
 
+public sealed class UsageColorOptions
+{
+    public bool Enabled { get; set; } = true;
+    public int WarningThreshold { get; set; } = 80;
+    public int CriticalThreshold { get; set; } = 95;
+}
+
 public sealed class AppSettings
 {
     public int SchemaVersion { get; set; } = 1;
@@ -80,6 +88,7 @@ public sealed class AppSettings
     public DisplayProfiles DisplayProfiles { get; set; } = new();
     public Dictionary<WidgetMode, WindowPlacement> Placements { get; set; } = [];
     public Dictionary<WidgetMode, double> LockedHeights { get; set; } = [];
+    public Dictionary<MetricKind, UsageColorOptions> UsageColors { get; set; } = UsageColorPolicy.CreateDefaults();
 }
 
 public sealed record DisplayElement(string Id, string Label);

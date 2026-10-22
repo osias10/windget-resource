@@ -74,6 +74,11 @@ public static class DisplayCatalog
         if (!Enum.IsDefined(settings.WidgetMode)) settings.WidgetMode = WidgetMode.Compact;
         if (!Enum.IsDefined(settings.Theme)) settings.Theme = ThemeMode.Dark;
         settings.BackgroundTransparency = Math.Clamp(settings.BackgroundTransparency, 0, 100);
+        var usageColors = UsageColorPolicy.CreateDefaults();
+        foreach (var kind in Enum.GetValues<MetricKind>())
+            if (settings.UsageColors is not null && settings.UsageColors.TryGetValue(kind, out var options))
+                usageColors[kind] = UsageColorPolicy.NormalizeOptions(options);
+        settings.UsageColors = usageColors;
         settings.LockedHeights ??= [];
         foreach (var key in settings.LockedHeights.Keys.ToArray())
         {

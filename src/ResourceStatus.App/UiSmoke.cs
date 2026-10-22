@@ -456,6 +456,7 @@ internal static class UiSmoke
             await UpdateUiSmoke.RunAsync(checks, directory);
             await WindowBehaviorUiSmoke.RunAsync(checks, directory);
             await PlacementUiSmoke.RunAsync(checks, directory);
+            await UsageColorUiSmoke.RunAsync(checks, directory, renderingAvailable, controller.Settings.Theme);
             WriteReport(output, checks, skipped, renderingAvailable, null);
         }
         catch (Exception error)

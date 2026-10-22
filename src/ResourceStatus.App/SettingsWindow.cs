@@ -1,8 +1,10 @@
 using System;
 using System.Collections.Generic;
+using System.Globalization;
 using System.Linq;
 using System.Windows;
 using System.Windows.Controls;
+using System.Windows.Input;
 using System.Windows.Media;
 using System.Windows.Threading;
 using ResourceStatus.Core;
@@ -21,6 +23,7 @@ public sealed class SettingsWindow : Window
     private readonly TextBlock _backgroundTransparencyValue = new() { Name = "BackgroundTransparencyValue" };
     private readonly DispatcherTimer _transparencySaveTimer;
     private readonly Dictionary<string, CheckBox> _generalChecks = [];
+    private readonly Dictionary<MetricKind, UsageColorEditor> _usageColorEditors = [];
     private bool _updating;
     private bool _transparencySavePending;
     private IReadOnlyList<DeviceOption>? _shownGpus, _shownNetworks;
@@ -58,6 +61,7 @@ public sealed class SettingsWindow : Window
         Grid.SetRow(_tabs, 2); root.Children.Add(_tabs);
         BuildProfiles();
         _tabs.Items.Add(new TabItem { Header = "일반", Content = GeneralPanel() });
+        _tabs.Items.Add(new TabItem { Name = "UsageColorsTab", Header = "색상 알림", Content = UsageColorsPanel() });
         _tabs.SelectedIndex = controller.Settings.WidgetMode == WidgetMode.Compact ? 0 : 1;
         _message = new TextBlock { Text = "변경 사항이 자동으로 저장됩니다.", Foreground = Theme.Muted, FontSize = 11, Margin = new Thickness(0, 14, 0, 0), TextWrapping = TextWrapping.Wrap };
         Grid.SetRow(_message, 3); root.Children.Add(_message);
@@ -68,6 +72,8 @@ public sealed class SettingsWindow : Window
         Theme.Changed += OnThemeChanged;
         Closing += (_, _) =>
         {
+            foreach (var editor in _usageColorEditors.Values)
+                if (editor.HasChanges) CommitUsageColor(editor);
             if (_transparencySavePending) Save();
         };
         Closed += (_, _) =>
@@ -139,6 +145,220 @@ public sealed class SettingsWindow : Window
         };
         stack.Children.Add(restore);
         return new ScrollViewer { VerticalScrollBarVisibility = ScrollBarVisibility.Auto, HorizontalScrollBarVisibility = ScrollBarVisibility.Disabled, Content = stack };
+    }
+
+    private sealed class UsageColorEditor
+    {
+        public required MetricKind Metric { get; init; }
+        public required CheckBox Enabled { get; init; }
+        public required Grid Inputs { get; init; }
+        public required TextBox Warning { get; init; }
+        public required TextBox Critical { get; init; }
+        public required TextBlock Validation { get; init; }
+        public bool HasChanges { get; set; }
+        public bool HasValidationError { get; set; }
+    }
+
+    private UIElement UsageColorsPanel()
+    {
+        var stack = new StackPanel { Margin = new Thickness(0, 15, 6, 0) };
+        stack.Children.Add(new TextBlock
+        {
+            Text = "작은·큰 위젯에 함께 적용됩니다. 사용률 숫자·게이지·그래프와 네트워크 송수신 속도에 적용합니다.\n기본값은 주황 80%, 빨강 95%입니다.",
+            Foreground = Theme.Muted, TextWrapping = TextWrapping.Wrap, LineHeight = 19,
+            Margin = new Thickness(2, 0, 2, 14)
+        });
+        foreach (var metric in Enum.GetValues<MetricKind>())
+        {
+            string label = DisplayCatalog.Label(metric);
+            var options = _controller.Settings.UsageColors[metric];
+            var card = new StackPanel { Margin = new Thickness(12) };
+            var head = new DockPanel { LastChildFill = true };
+            var enabled = new CheckBox
+            {
+                Name = "UsageColorEnabled" + metric, Content = "사용", IsChecked = options.Enabled,
+                VerticalAlignment = VerticalAlignment.Center
+            };
+            System.Windows.Automation.AutomationProperties.SetName(enabled, label + " 색상 알림");
+            DockPanel.SetDock(enabled, Dock.Right);
+            head.Children.Add(enabled);
+            head.Children.Add(new TextBlock { Text = label, FontSize = 14, FontWeight = FontWeights.SemiBold });
+            card.Children.Add(head);
+
+            var inputs = new Grid { Margin = new Thickness(0, 10, 0, 0), IsEnabled = options.Enabled, Opacity = options.Enabled ? 1 : 0.45 };
+            inputs.ColumnDefinitions.Add(new ColumnDefinition());
+            inputs.ColumnDefinitions.Add(new ColumnDefinition());
+            var warning = ThresholdInput("UsageColorWarning" + metric, label + " 주황 기준", options.WarningThreshold);
+            var critical = ThresholdInput("UsageColorCritical" + metric, label + " 빨강 기준", options.CriticalThreshold);
+            AddThresholdColumn(inputs, warning, "주황 기준", Theme.UsageWarning, 0);
+            AddThresholdColumn(inputs, critical, "빨강 기준", Theme.UsageCritical, 1);
+            card.Children.Add(inputs);
+            var validation = new TextBlock
+            {
+                Name = "UsageColorValidation" + metric, Foreground = Theme.Muted, FontSize = 11,
+                TextWrapping = TextWrapping.Wrap, Margin = new Thickness(0, 9, 0, 0), LineHeight = 17
+            };
+            System.Windows.Automation.AutomationProperties.SetLiveSetting(validation, System.Windows.Automation.AutomationLiveSetting.Polite);
+            card.Children.Add(validation);
+            var editor = new UsageColorEditor
+            {
+                Metric = metric, Enabled = enabled, Inputs = inputs,
+                Warning = warning, Critical = critical, Validation = validation
+            };
+            _usageColorEditors[metric] = editor;
+            SetUsageColorMessage(editor);
+            foreach (var input in new[] { warning, critical })
+            {
+                input.TextChanged += (_, _) =>
+                {
+                    if (_updating) return;
+                    editor.HasChanges = true;
+                    if (editor.HasValidationError)
+                    {
+                        TryReadUsageColor(editor, out _, out _, out string? error);
+                        SetUsageColorMessage(editor, error);
+                    }
+                };
+                input.LostKeyboardFocus += (_, _) => { if (!_updating && editor.HasChanges) CommitUsageColor(editor); };
+                input.KeyDown += (_, args) =>
+                {
+                    if (args.Key != Key.Enter || _updating) return;
+                    CommitUsageColor(editor);
+                    args.Handled = true;
+                };
+            }
+            void EnabledChanged(object sender, RoutedEventArgs args)
+            {
+                if (_updating) return;
+                // Commit a valid draft together with this toggle. Invalid text stays local
+                // to the editor; disabling an alert never writes invalid thresholds.
+                if (editor.HasChanges) CommitUsageColor(editor, save: false);
+                _controller.Settings.UsageColors[metric].Enabled = enabled.IsChecked == true;
+                _updating = true;
+                try
+                {
+                    inputs.IsEnabled = enabled.IsChecked == true;
+                    inputs.Opacity = inputs.IsEnabled ? 1 : 0.45;
+                }
+                finally { _updating = false; }
+                if (!editor.HasValidationError) SetUsageColorMessage(editor);
+                Save();
+            }
+            enabled.Checked += EnabledChanged;
+            enabled.Unchecked += EnabledChanged;
+            stack.Children.Add(new Border
+            {
+                Background = Theme.Surface, BorderBrush = Theme.Border, BorderThickness = new Thickness(1),
+                CornerRadius = new CornerRadius(7), Margin = new Thickness(0, 0, 0, 12), Child = card
+            });
+        }
+        stack.Children.Add(new TextBlock
+        {
+            Text = "Enter를 누르거나 입력 칸을 벗어나면 유효한 기준값을 적용하고 저장합니다.\n색이 자주 바뀌지 않도록 사용률이 내려갈 때는 각 기준에 최대 3%p의 여유를 적용합니다.\n\n네트워크는 링크 사용률을 기준으로 판단합니다. 링크 속도나 사용률을 알 수 없으면 기본색을 유지합니다.",
+            Foreground = Theme.Muted, TextWrapping = TextWrapping.Wrap, FontSize = 11,
+            LineHeight = 19, Margin = new Thickness(2, 0, 2, 12)
+        });
+        return new ScrollViewer
+        {
+            VerticalScrollBarVisibility = ScrollBarVisibility.Auto,
+            HorizontalScrollBarVisibility = ScrollBarVisibility.Disabled, Content = stack
+        };
+
+        static TextBox ThresholdInput(string name, string label, int value)
+        {
+            var input = new TextBox
+            {
+                Name = name, Text = value.ToString(CultureInfo.InvariantCulture), MaxLength = 3,
+                Width = 64, MinHeight = 30, Padding = new Thickness(6, 4, 6, 4),
+                TextAlignment = TextAlignment.Right, VerticalContentAlignment = VerticalAlignment.Center,
+                Foreground = Theme.Text, Background = Theme.Background, BorderBrush = Theme.Border,
+                BorderThickness = new Thickness(1), CaretBrush = Theme.Text, SelectionBrush = Theme.Cpu
+            };
+            System.Windows.Automation.AutomationProperties.SetName(input, label);
+            System.Windows.Automation.AutomationProperties.SetHelpText(input, "1~100 사이의 정수. 주황 기준은 빨강 기준보다 낮아야 합니다. Enter 또는 초점 이동으로 저장합니다.");
+            return input;
+        }
+
+        static void AddThresholdColumn(Grid inputs, TextBox input, string label, Brush color, int column)
+        {
+            var content = new StackPanel { Margin = new Thickness(0, 0, 12, 0) };
+            var heading = new StackPanel { Orientation = Orientation.Horizontal };
+            heading.Children.Add(new Border
+            {
+                Width = 8, Height = 8, CornerRadius = new CornerRadius(4), Background = color,
+                Margin = new Thickness(0, 0, 6, 0), VerticalAlignment = VerticalAlignment.Center
+            });
+            heading.Children.Add(new TextBlock { Text = label, Foreground = Theme.Text });
+            content.Children.Add(new Label { Content = heading, Target = input, Padding = new Thickness(0, 0, 0, 6) });
+            var value = new StackPanel { Orientation = Orientation.Horizontal };
+            value.Children.Add(input);
+            value.Children.Add(new TextBlock { Text = "% 이상", Foreground = Theme.Muted, Margin = new Thickness(6, 0, 0, 0), VerticalAlignment = VerticalAlignment.Center });
+            content.Children.Add(value);
+            Grid.SetColumn(content, column);
+            inputs.Children.Add(content);
+        }
+    }
+
+    private static bool TryReadUsageColor(UsageColorEditor editor, out int warning, out int critical, out string? error)
+    {
+        bool warningParsed = int.TryParse(editor.Warning.Text.Trim(), NumberStyles.None, CultureInfo.InvariantCulture, out warning);
+        bool criticalParsed = int.TryParse(editor.Critical.Text.Trim(), NumberStyles.None, CultureInfo.InvariantCulture, out critical);
+        error = !warningParsed || !criticalParsed ? "1~100 사이의 정수를 입력하세요. 입력한 값은 저장되지 않았습니다."
+            : warning < 1 || warning > 99 || critical < 2 || critical > 100 ? "주황은 1~99%, 빨강은 2~100%로 입력하세요. 입력한 값은 저장되지 않았습니다."
+            : warning >= critical ? "주황 기준은 빨강 기준보다 낮아야 합니다. 입력한 값은 저장되지 않았습니다."
+            : null;
+        return error is null;
+    }
+
+    private void SetUsageColorMessage(UsageColorEditor editor, string? error = null)
+    {
+        editor.HasValidationError = error is not null;
+        editor.Validation.Text = error ?? (editor.Enabled.IsChecked == true
+            ? "1~100% · 주황 기준은 빨강 기준보다 낮아야 합니다."
+            : "기본색을 사용합니다. 설정한 기준값은 보존됩니다.");
+        editor.Validation.Foreground = error is null ? Theme.Muted : Theme.Warning;
+        editor.Warning.BorderBrush = editor.Critical.BorderBrush = error is null ? Theme.Border : Theme.Warning;
+    }
+
+    private bool CommitUsageColor(UsageColorEditor editor, bool save = true)
+    {
+        if (!TryReadUsageColor(editor, out int warning, out int critical, out string? error))
+        {
+            SetUsageColorMessage(editor, error);
+            return false;
+        }
+        var options = _controller.Settings.UsageColors[editor.Metric];
+        bool changed = options.WarningThreshold != warning || options.CriticalThreshold != critical;
+        options.WarningThreshold = warning;
+        options.CriticalThreshold = critical;
+        editor.HasChanges = false;
+        _updating = true;
+        try
+        {
+            editor.Warning.Text = warning.ToString(CultureInfo.InvariantCulture);
+            editor.Critical.Text = critical.ToString(CultureInfo.InvariantCulture);
+        }
+        finally { _updating = false; }
+        SetUsageColorMessage(editor);
+        if (save && changed) Save();
+        return true;
+    }
+
+    private void SyncUsageColorEditors()
+    {
+        foreach (var (metric, editor) in _usageColorEditors)
+        {
+            var options = _controller.Settings.UsageColors[metric];
+            editor.Enabled.IsChecked = options.Enabled;
+            editor.Inputs.IsEnabled = options.Enabled;
+            editor.Inputs.Opacity = options.Enabled ? 1 : 0.45;
+            // Another setting can be saved while a threshold is only partly typed.
+            // Preserve that local draft until it is committed or this window closes.
+            if (editor.HasChanges) continue;
+            editor.Warning.Text = options.WarningThreshold.ToString(CultureInfo.InvariantCulture);
+            editor.Critical.Text = options.CriticalThreshold.ToString(CultureInfo.InvariantCulture);
+            SetUsageColorMessage(editor);
+        }
     }
 
     private UIElement GeneralPanel()
@@ -339,6 +559,7 @@ public sealed class SettingsWindow : Window
             _backgroundTransparency.Value = _controller.Settings.BackgroundTransparency;
             _backgroundTransparencyValue.Text = $"{_controller.Settings.BackgroundTransparency}%";
             _generalChecks["Windows 로그인 시 시작"].IsChecked = _controller.Settings.StartWithWindows;
+            SyncUsageColorEditors();
         }
         finally { _updating = false; }
         UpdateDevices();

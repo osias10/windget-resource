@@ -190,8 +190,8 @@ public sealed class MainWindow : Window
         _footer.Text = _controller.SaveError ?? (_controller.IsDemo ? "데모 · 실제 측정값이 아닙니다" : "최근 60초 · 1초 갱신");
         _footer.ToolTip = _controller.SaveError ?? _controller.CollectionError;
         _pin.Foreground = _controller.Settings.AlwaysOnTop ? Theme.Cpu : Theme.Muted;
-        if (compact) { _compact.Refresh(_controller.Settings, _controller.Current, _controller.History.Samples); _scroll.Content = _compact; }
-        else { _expanded.Refresh(_controller.Settings, _controller.Current, _controller.History.Samples); _scroll.Content = _expanded; }
+        if (compact) { _compact.Refresh(_controller.Settings, _controller.Current, _controller.History.Samples, _controller.UsageColors); _scroll.Content = _compact; }
+        else { _expanded.Refresh(_controller.Settings, _controller.Current, _controller.History.Samples, _controller.UsageColors); _scroll.Content = _expanded; }
         QueueFit();
     }
 

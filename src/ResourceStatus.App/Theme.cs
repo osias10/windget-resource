@@ -33,6 +33,8 @@ public static class Theme
     public static SolidColorBrush Download { get; } = Brush(nameof(Palette.Download));
     public static SolidColorBrush Upload { get; } = Brush(nameof(Palette.Upload));
     public static SolidColorBrush Warning { get; } = Brush(nameof(Palette.Warning));
+    public static SolidColorBrush UsageWarning { get; } = Brush(nameof(Palette.UsageWarning));
+    public static SolidColorBrush UsageCritical { get; } = Brush(nameof(Palette.UsageCritical));
     public static FontFamily FontFamily { get; } = new("Segoe UI Variable Text, Segoe UI, Malgun Gothic");
     public static bool IsDark { get; private set; } = true;
     public static event EventHandler? Changed;
@@ -82,7 +84,7 @@ public static class Theme
         PaletteSource.SetDark(dark);
         // Native backdrop tint is computed inside Changed handlers, so publish fully
         // updated brush colors even if a binding transfer was queued by WPF.
-        foreach (var brush in new[] { Text, Muted, Border, Background, Surface, Hover, Track, Cpu, Ram, Gpu, Download, Upload, Warning })
+        foreach (var brush in new[] { Text, Muted, Border, Background, Surface, Hover, Track, Cpu, Ram, Gpu, Download, Upload, Warning, UsageWarning, UsageCritical })
             BindingOperations.GetBindingExpression(brush, SolidColorBrush.ColorProperty)?.UpdateTarget();
         Changed?.Invoke(null, EventArgs.Empty);
     }
@@ -119,6 +121,8 @@ public static class Theme
         public Color Download => Color("#7FB7ED", "#2668A7");
         public Color Upload => Color("#E1B879", "#8F5B10");
         public Color Warning => Color("#D6AC70", "#8B590E");
+        public Color UsageWarning => Color("#FFAA4C", "#A34B00");
+        public Color UsageCritical => Color("#FF7078", "#C32432");
 
         private Color Color(string dark, string light) => (Color)ColorConverter.ConvertFromString(_dark ? dark : light);
 

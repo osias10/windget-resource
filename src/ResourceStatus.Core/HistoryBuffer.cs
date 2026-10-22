@@ -26,7 +26,7 @@ public sealed class HistoryBuffer
         _samples.Add(new HistorySample(snapshot.Timestamp,
             Value(snapshot.Cpu.Usage), Value(snapshot.Ram.Usage), Value(snapshot.Gpu.Usage),
             Value(snapshot.Network.DownloadBytesPerSecond), Value(snapshot.Network.UploadBytesPerSecond),
-            snapshot.Gpu.DeviceId, snapshot.Network.DeviceId));
+            snapshot.Gpu.DeviceId, snapshot.Network.DeviceId, Value(snapshot.Network.LinkUsage)));
         var cutoff = snapshot.Timestamp.AddSeconds(-60);
         _samples.RemoveAll(x => x.Timestamp < cutoff);
     }

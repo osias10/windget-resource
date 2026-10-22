@@ -7,6 +7,203 @@ using System.Text;
 
 var cases = new (string Name, Action Run)[]
 {
+    ("Usage colors enter at configured thresholds and recover strictly below the hysteresis boundary", () =>
+    {
+        var options = new UsageColorOptions();
+        Equal(UsageSeverity.Normal, UsageColorPolicy.Evaluate(79.999, options));
+        Equal(UsageSeverity.Warning, UsageColorPolicy.Evaluate(80, options));
+        Equal(UsageSeverity.Warning, UsageColorPolicy.Evaluate(94.999, options));
+        Equal(UsageSeverity.Critical, UsageColorPolicy.Evaluate(95, options));
+        Equal(UsageSeverity.Warning, UsageColorPolicy.Evaluate(79, options, UsageSeverity.Warning));
+        Equal(UsageSeverity.Warning, UsageColorPolicy.Evaluate(77, options, UsageSeverity.Warning));
+        Equal(UsageSeverity.Normal, UsageColorPolicy.Evaluate(76.999, options, UsageSeverity.Warning));
+        Equal(UsageSeverity.Critical, UsageColorPolicy.Evaluate(94, options, UsageSeverity.Critical));
+        Equal(UsageSeverity.Critical, UsageColorPolicy.Evaluate(92, options, UsageSeverity.Critical));
+        Equal(UsageSeverity.Warning, UsageColorPolicy.Evaluate(91.999, options, UsageSeverity.Critical));
+        Equal(UsageSeverity.Warning, UsageColorPolicy.Evaluate(77, options, UsageSeverity.Critical));
+        Equal(UsageSeverity.Normal, UsageColorPolicy.Evaluate(76.999, options, UsageSeverity.Critical));
+        Equal(77d, UsageColorPolicy.RecoveryThreshold(80));
+        Equal(92d, UsageColorPolicy.RecoveryThreshold(95));
+    }),
+    ("Usage colors honor custom thresholds and unknown values never retain a previous alert", () =>
+    {
+        var options = new UsageColorOptions { WarningThreshold = 60, CriticalThreshold = 90 };
+        Equal(UsageSeverity.Warning, UsageColorPolicy.Evaluate(60, options));
+        Equal(UsageSeverity.Critical, UsageColorPolicy.Evaluate(90, options));
+        Equal(UsageSeverity.Critical, UsageColorPolicy.Evaluate(87, options, UsageSeverity.Critical));
+        Equal(UsageSeverity.Warning, UsageColorPolicy.Evaluate(86.999, options, UsageSeverity.Critical));
+        Equal(UsageSeverity.Normal, UsageColorPolicy.Evaluate(56.999, options, UsageSeverity.Warning));
+        foreach (double? missing in new double?[] { null, double.NaN, double.PositiveInfinity, double.NegativeInfinity, -1 })
+            Equal(UsageSeverity.Normal, UsageColorPolicy.Evaluate(missing, options, UsageSeverity.Critical));
+        Equal(UsageSeverity.Critical, UsageColorPolicy.Evaluate(101, options));
+        options.Enabled = false;
+        Equal(UsageSeverity.Normal, UsageColorPolicy.Evaluate(100, options, UsageSeverity.Critical));
+        var low = new UsageColorOptions { WarningThreshold = 1, CriticalThreshold = 2 };
+        Equal(UsageSeverity.Critical, UsageColorPolicy.Evaluate(2, low));
+        Equal(UsageSeverity.Normal, UsageColorPolicy.Evaluate(0, low, UsageSeverity.Critical));
+        Equal(UsageSeverity.Normal, UsageColorPolicy.Evaluate(0, low, UsageSeverity.Warning));
+        var high = new UsageColorOptions { WarningThreshold = 99, CriticalThreshold = 100 };
+        Equal(UsageSeverity.Critical, UsageColorPolicy.Evaluate(97, high, UsageSeverity.Critical));
+        Equal(UsageSeverity.Warning, UsageColorPolicy.Evaluate(96.5, high, UsageSeverity.Critical));
+        Equal(UsageSeverity.Normal, UsageColorPolicy.Evaluate(95.999, high, UsageSeverity.Critical));
+    }),
+    ("Usage color defaults and per-metric choices survive migration and restart without sharing option objects", () => WithTemp(directory =>
+    {
+        var defaults = new AppSettings();
+        Equal(4, defaults.UsageColors.Count);
+        Check(defaults.UsageColors.Values.All(option => option.Enabled && option.WarningThreshold == 80 && option.CriticalThreshold == 95), "Approved defaults");
+        defaults.UsageColors[MetricKind.Cpu].WarningThreshold = 70;
+        Equal(80, defaults.UsageColors[MetricKind.Ram].WarningThreshold);
+        Equal(80, new AppSettings().UsageColors[MetricKind.Cpu].WarningThreshold);
+        string path = Path.Combine(directory, "settings.json");
+        File.WriteAllText(path, """{"Theme":"Light","BackgroundTransparency":61}""");
+        var migrated = new SettingsStore(path).Load();
+        Equal(4, migrated.UsageColors.Count);
+        Equal(ThemeMode.Light, migrated.Theme);
+        Equal(61, migrated.BackgroundTransparency);
+        migrated.UsageColors[MetricKind.Cpu] = new() { Enabled = false, WarningThreshold = 65, CriticalThreshold = 90 };
+        migrated.UsageColors[MetricKind.Network] = new() { WarningThreshold = 40, CriticalThreshold = 75 };
+        new SettingsStore(path).Save(migrated);
+        var restored = new SettingsStore(path).Load();
+        Check(!restored.UsageColors[MetricKind.Cpu].Enabled, "Disabled choice retained");
+        Equal(65, restored.UsageColors[MetricKind.Cpu].WarningThreshold);
+        Equal(90, restored.UsageColors[MetricKind.Cpu].CriticalThreshold);
+        Equal(40, restored.UsageColors[MetricKind.Network].WarningThreshold);
+        Equal(75, restored.UsageColors[MetricKind.Network].CriticalThreshold);
+    })),
+    ("Usage color normalization repairs invalid pairs, missing entries and aliases while preserving disabled choices", () =>
+    {
+        foreach (var pair in new[] { (0, 95), (80, 80), (95, 80), (80, 101), (-1, 95) })
+        {
+            var settings = new AppSettings { UsageColors = new() { [MetricKind.Cpu] = new() { Enabled = false, WarningThreshold = pair.Item1, CriticalThreshold = pair.Item2 }, [MetricKind.Ram] = null!, [(MetricKind)99] = new() } };
+            DisplayCatalog.Normalize(settings);
+            Equal(4, settings.UsageColors.Count);
+            Check(!settings.UsageColors[MetricKind.Cpu].Enabled, "Disable retained during repair");
+            Equal(80, settings.UsageColors[MetricKind.Cpu].WarningThreshold);
+            Equal(95, settings.UsageColors[MetricKind.Cpu].CriticalThreshold);
+            Check(settings.UsageColors[MetricKind.Ram].Enabled, "Null option repaired");
+            Check(!settings.UsageColors.ContainsKey((MetricKind)99), "Unknown metric dropped");
+        }
+        var shared = new UsageColorOptions { WarningThreshold = 1, CriticalThreshold = 100 };
+        var aliased = new AppSettings { UsageColors = new() { [MetricKind.Cpu] = shared, [MetricKind.Ram] = shared } };
+        DisplayCatalog.Normalize(aliased);
+        aliased.UsageColors[MetricKind.Cpu].WarningThreshold = 60;
+        Equal(1, aliased.UsageColors[MetricKind.Ram].WarningThreshold);
+        aliased.UsageColors = null!;
+        DisplayCatalog.Normalize(aliased);
+        Equal(4, aliased.UsageColors.Count);
+    }),
+    ("History records network link utilization independently of transfer rates and preserves missing gaps", () =>
+    {
+        var start = DateTimeOffset.UtcNow;
+        var history = new HistoryBuffer();
+        var snapshot = Snapshot(start);
+        history.Add(snapshot with { Network = snapshot.Network with { LinkUsage = Reading<double>.Ready(95) } });
+        Equal(95d, history.Samples[0].LinkUsage!.Value);
+        Equal(1000d, history.Samples[0].Download!.Value);
+        history.Add(snapshot with { Timestamp = start.AddSeconds(1), Network = snapshot.Network with { LinkUsage = Reading<double>.Missing(ReadingState.Unsupported) } });
+        Check(history.Samples[^1].LinkUsage is null && history.Samples[^1].Download == 1000, "Unknown link denominator keeps known transfer rates");
+        history.Add(snapshot with { Timestamp = start.AddSeconds(5) });
+        Check(history.Samples[^2].LinkUsage is null && history.Samples[^2].Cpu is null, "Sleep gap has no link-utilization sample");
+        history.Add(snapshot with { Timestamp = start.AddSeconds(5), Network = snapshot.Network with { LinkUsage = Reading<double>.Ready(double.NaN) } });
+        Check(history.Samples[^1].LinkUsage is null, "Nonfinite link utilization is missing");
+    }),
+    ("Usage timeline retains historical levels with hysteresis and colors network by link usage", () =>
+    {
+        var start = DateTimeOffset.UtcNow;
+        double[] values = [79, 80, 79, 77, 76.9, 95, 94, 92, 91, 76];
+        UsageSeverity[] expected = [UsageSeverity.Normal, UsageSeverity.Warning, UsageSeverity.Warning, UsageSeverity.Warning, UsageSeverity.Normal,
+            UsageSeverity.Critical, UsageSeverity.Critical, UsageSeverity.Critical, UsageSeverity.Warning, UsageSeverity.Normal];
+        var samples = values.Select((value, index) => UsageSample(start.AddSeconds(index), value)).ToArray();
+        var timeline = new UsageColorTimeline();
+        timeline.Update(samples, UsageColorPolicy.CreateDefaults());
+        for (int index = 0; index < samples.Length; index++)
+            foreach (var kind in Enum.GetValues<MetricKind>()) Equal(expected[index], timeline.GetLevel(kind, samples[index].Timestamp));
+        timeline.Update([UsageSample(start.AddSeconds(20), 10) with { Download = 999_999_999, Upload = 999_999_999, LinkUsage = null }], UsageColorPolicy.CreateDefaults());
+        Equal(UsageSeverity.Normal, timeline.GetLevel(MetricKind.Network, start.AddSeconds(20)));
+        Equal(UsageSeverity.Normal, timeline.GetLevel(MetricKind.Cpu, start.AddSeconds(100)));
+    }),
+    ("Sliding history eviction never recolors retained hysteresis samples when the original peak disappears", () =>
+    {
+        var start = DateTimeOffset.UtcNow;
+        var timeline = new UsageColorTimeline();
+        var options = UsageColorPolicy.CreateDefaults();
+        var history = new HistoryBuffer();
+        for (int index = 0; index <= 125; index++)
+        {
+            history.Add(Snapshot(start.AddSeconds(index), index == 0 ? 95 : 94));
+            timeline.Update(history.Samples, options);
+            Equal(UsageSeverity.Critical, timeline.GetLevel(MetricKind.Cpu, history.Samples[0].Timestamp));
+            Equal(UsageSeverity.Critical, timeline.GetLevel(MetricKind.Cpu, history.Samples[^1].Timestamp));
+        }
+        Equal(61, history.Samples.Count);
+        Equal(UsageSeverity.Normal, timeline.GetLevel(MetricKind.Cpu, start));
+        history.Add(Snapshot(start.AddSeconds(126), 91));
+        timeline.Update(history.Samples, options);
+        Equal(UsageSeverity.Warning, timeline.GetLevel(MetricKind.Cpu, start.AddSeconds(126)));
+        Equal(UsageSeverity.Critical, timeline.GetLevel(MetricKind.Cpu, history.Samples[0].Timestamp));
+    }),
+    ("Usage timeline resets only missing or changed-device metrics and resets all after a real time gap", () =>
+    {
+        var start = DateTimeOffset.UtcNow;
+        HistorySample[] samples = [UsageSample(start, 95), UsageSample(start.AddSeconds(1), 94) with { Cpu = null, GpuId = "gpu2", NetworkId = "net2" }, UsageSample(start.AddSeconds(2), 94) with { GpuId = "gpu2", NetworkId = "net2" }];
+        var timeline = new UsageColorTimeline();
+        var options = UsageColorPolicy.CreateDefaults();
+        timeline.Update(samples, options);
+        Equal(UsageSeverity.Normal, timeline.GetLevel(MetricKind.Cpu, samples[1].Timestamp));
+        Equal(UsageSeverity.Warning, timeline.GetLevel(MetricKind.Cpu, samples[2].Timestamp));
+        Equal(UsageSeverity.Critical, timeline.GetLevel(MetricKind.Ram, samples[2].Timestamp));
+        Equal(UsageSeverity.Warning, timeline.GetLevel(MetricKind.Gpu, samples[1].Timestamp));
+        Equal(UsageSeverity.Warning, timeline.GetLevel(MetricKind.Network, samples[1].Timestamp));
+        var resumed = UsageSample(start.AddSeconds(5), 94) with { GpuId = "gpu2", NetworkId = "net2" };
+        timeline.Update([.. samples, resumed], options);
+        foreach (var kind in Enum.GetValues<MetricKind>()) Equal(UsageSeverity.Warning, timeline.GetLevel(kind, resumed.Timestamp));
+        timeline.Update([], options);
+        timeline.Update([UsageSample(start.AddSeconds(6), 79)], options);
+        Equal(UsageSeverity.Normal, timeline.GetLevel(MetricKind.Cpu, start.AddSeconds(6)));
+    }),
+    ("Usage timeline recalculates corrected timestamps from the preceding state, including the first retained sample", () =>
+    {
+        var start = DateTimeOffset.UtcNow;
+        var options = UsageColorPolicy.CreateDefaults();
+        var timeline = new UsageColorTimeline();
+        HistorySample[] original = [UsageSample(start, 80), UsageSample(start.AddSeconds(1), 95), UsageSample(start.AddSeconds(2), 94)];
+        timeline.Update(original, options);
+        Equal(UsageSeverity.Critical, timeline.GetLevel(MetricKind.Cpu, original[2].Timestamp));
+        timeline.Update([original[0], original[1] with { Cpu = 79 }, original[2]], options);
+        Equal(UsageSeverity.Warning, timeline.GetLevel(MetricKind.Cpu, original[2].Timestamp));
+        Equal(UsageSeverity.Critical, timeline.GetLevel(MetricKind.Ram, original[2].Timestamp));
+        timeline.Update([original[1] with { Cpu = 78 }, original[2]], options);
+        Equal(UsageSeverity.Warning, timeline.GetLevel(MetricKind.Cpu, original[1].Timestamp));
+        timeline.Update([original[1] with { Cpu = 76 }, original[2] with { Cpu = 79 }], options);
+        Equal(UsageSeverity.Normal, timeline.GetLevel(MetricKind.Cpu, original[2].Timestamp));
+        timeline.Update([original[2] with { Cpu = 80 }, original[2] with { Cpu = 79 }], options);
+        Equal(UsageSeverity.Normal, timeline.GetLevel(MetricKind.Cpu, original[2].Timestamp));
+    }),
+    ("Changing color settings reevaluates affected history while preserving unrelated retained states", () =>
+    {
+        var start = DateTimeOffset.UtcNow;
+        var options = UsageColorPolicy.CreateDefaults();
+        var timeline = new UsageColorTimeline();
+        var peak = UsageSample(start, 95);
+        var retained = UsageSample(start.AddSeconds(1), 94);
+        timeline.Update([peak, retained], options);
+        timeline.Update([retained], options);
+        options[MetricKind.Ram].Enabled = false;
+        timeline.Update([retained], options);
+        Equal(UsageSeverity.Normal, timeline.GetLevel(MetricKind.Ram, retained.Timestamp));
+        Equal(UsageSeverity.Critical, timeline.GetLevel(MetricKind.Cpu, retained.Timestamp));
+        options[MetricKind.Ram].Enabled = true;
+        timeline.Update([retained], options);
+        Equal(UsageSeverity.Warning, timeline.GetLevel(MetricKind.Ram, retained.Timestamp));
+        options[MetricKind.Cpu].CriticalThreshold = 99;
+        timeline.Update([retained], options);
+        Equal(UsageSeverity.Warning, timeline.GetLevel(MetricKind.Cpu, retained.Timestamp));
+        options[MetricKind.Cpu].WarningThreshold = 96;
+        timeline.Update([retained], options);
+        Equal(UsageSeverity.Normal, timeline.GetLevel(MetricKind.Cpu, retained.Timestamp));
+        Equal(UsageSeverity.Critical, timeline.GetLevel(MetricKind.Network, retained.Timestamp));
+    }),
     ("Placement selects the exact monitor identity before absolute coordinates and defaults to primary", () =>
     {
         MonitorWorkArea[] monitors = [new("left-monitor", -1920, 0, 1920, 1040, false), new("main-monitor", 0, 40, 1920, 1040, true)];
@@ -1047,6 +1244,8 @@ static SystemSnapshot Snapshot(DateTimeOffset timestamp, double cpu = 25) => new
     new GpuSnapshot("gpu1", "GPU", Reading<double>.Ready(12), Reading<ulong>.Ready(2UL << 30), Reading<ulong>.Ready(8UL << 30), Reading<ulong>.Ready(0)),
     new NetworkSnapshot("net1", "Ethernet", Reading<double>.Ready(1000), Reading<double>.Ready(200), Reading<double>.Ready(1),
         Reading<ulong>.Ready(1_000_000_000), Reading<ulong>.Ready(1_000_000_000), "인터넷 연결"));
+
+static HistorySample UsageSample(DateTimeOffset timestamp, double? usage) => new(timestamp, usage, usage, usage, 1000, 200, "gpu1", "net1", usage);
 
 static void RejectUpdate(Action run)
 {
