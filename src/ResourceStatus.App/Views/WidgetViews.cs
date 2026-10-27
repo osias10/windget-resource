@@ -139,6 +139,7 @@ public abstract class WidgetView : UserControl
             Background = Brushes.Transparent;
             Child = _body;
             var heading = new Grid { MinHeight = compact ? 16 : 22 };
+            heading.ColumnDefinitions.Add(new ColumnDefinition { Width = GridLength.Auto });
             heading.ColumnDefinitions.Add(new ColumnDefinition { Width = new GridLength(1, GridUnitType.Star) });
             heading.ColumnDefinitions.Add(new ColumnDefinition { Width = GridLength.Auto });
             heading.ColumnDefinitions.Add(new ColumnDefinition { Width = GridLength.Auto });
@@ -155,12 +156,22 @@ public abstract class WidgetView : UserControl
             label.FontWeight = FontWeights.SemiBold;
             identity.Children.Add(label);
             heading.Children.Add(identity);
+            if (Has(ElementIds.Name))
+            {
+                var name = MakeText("—", false);
+                name.FontSize = compact ? 9 : 10;
+                name.Foreground = Theme.Muted;
+                name.Margin = new Thickness(6, 0, 6, 0);
+                Grid.SetColumn(name, 1);
+                _values.Add(ElementIds.Name, name);
+                heading.Children.Add(name);
+            }
             _status = MakeText("", false);
             _status.Margin = new Thickness(5, 0, 5, 0);
             _status.FontSize = compact ? 8 : 10;
             _status.Foreground = Theme.Warning;
             _status.Visibility = Visibility.Collapsed;
-            Grid.SetColumn(_status, 1);
+            Grid.SetColumn(_status, 2);
             heading.Children.Add(_status);
 
             // Current percentage belongs to the header; hiding it creates no reserved blank column.
@@ -170,23 +181,12 @@ public abstract class WidgetView : UserControl
                 usage.FontSize = compact ? 11 : 20;
                 usage.FontWeight = compact ? FontWeights.Medium : FontWeights.SemiBold;
                 usage.HorizontalAlignment = HorizontalAlignment.Right;
-                Grid.SetColumn(usage, 2);
+                Grid.SetColumn(usage, 3);
                 _values.Add(ElementIds.Usage, usage);
                 heading.Children.Add(usage);
             }
-            else if (kind == MetricKind.Network && (Has(ElementIds.Download) || Has(ElementIds.Upload)))
-            {
-                var id = Has(ElementIds.Download) ? ElementIds.Download : ElementIds.Upload;
-                var rate = MakeText("—", true);
-                rate.Foreground = id == ElementIds.Download ? Theme.Download : Theme.Upload;
-                rate.HorizontalAlignment = HorizontalAlignment.Right;
-                Grid.SetColumn(rate, 2);
-                _values.Add(id, rate);
-                heading.Children.Add(rate);
-            }
             _body.Children.Add(heading);
 
-            if (Has(ElementIds.Name)) AddLine(ElementIds.Name, "—", muted: true);
             if (kind == MetricKind.Ram && (Has(ElementIds.Used) || Has(ElementIds.Total))) _memory = AddLine("memory", "—", muted: true);
             if (kind == MetricKind.Gpu)
             {
@@ -195,13 +195,19 @@ public abstract class WidgetView : UserControl
             }
             if (kind == MetricKind.Network)
             {
+                var rates = new Grid { Margin = new Thickness(0, 2, 0, 0) };
                 foreach (var id in new[] { ElementIds.Download, ElementIds.Upload })
                 {
-                    if (!Has(id) || _values.ContainsKey(id)) continue;
-                    var rate = AddLine(id, "—", muted: false);
+                    if (!Has(id)) continue;
+                    var rate = MakeText("—", true);
                     rate.Foreground = id == ElementIds.Download ? Theme.Download : Theme.Upload;
-                    rate.TextAlignment = compact ? TextAlignment.Right : TextAlignment.Left;
+                    if (id == ElementIds.Download && Has(ElementIds.Upload)) rate.Margin = new Thickness(0, 0, 6, 0);
+                    Grid.SetColumn(rate, rates.ColumnDefinitions.Count);
+                    rates.ColumnDefinitions.Add(new ColumnDefinition());
+                    _values.Add(id, rate);
+                    rates.Children.Add(rate);
                 }
+                if (rates.Children.Count > 0) _body.Children.Add(rates);
                 if (Has(ElementIds.ReceiveLink) || Has(ElementIds.TransmitLink)) _links = AddLine("links", "—", muted: true);
                 if (Has(ElementIds.Connection)) AddLine(ElementIds.Connection, "확인 불가", muted: true);
             }

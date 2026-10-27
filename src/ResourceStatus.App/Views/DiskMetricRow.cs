@@ -34,10 +34,11 @@ internal sealed class DiskMetricRow : Border
         var body = new StackPanel();
         Child = body;
 
-        // A star-sized label (rather than a horizontal StackPanel) allows long names to trim.
+        // Keep the identifier and status legible while the optional model uses the remaining header space.
         var heading = new Grid { MinHeight = compact ? 16 : 22 };
         heading.ColumnDefinitions.Add(new() { Width = GridLength.Auto });
-        heading.ColumnDefinitions.Add(new() { Width = new GridLength(1, GridUnitType.Star) });
+        heading.ColumnDefinitions.Add(new() { Width = Has(ElementIds.Name) ? GridLength.Auto : new GridLength(1, GridUnitType.Star) });
+        if (Has(ElementIds.Name)) heading.ColumnDefinitions.Add(new() { Width = new GridLength(1, GridUnitType.Star) });
         heading.ColumnDefinitions.Add(new() { Width = GridLength.Auto });
         var icon = Text("\uEDA2", 12, Theme.Download);
         icon.FontFamily = new FontFamily("Segoe Fluent Icons, Segoe MDL2 Assets");
@@ -47,23 +48,25 @@ internal sealed class DiskMetricRow : Border
         var title = Text(IsTotal ? "디스크 · 전체 합계" : device.Name, compact ? 9 : 11, Theme.Text);
         title.FontWeight = FontWeights.SemiBold;
         title.ToolTip = title.Text;
+        if (Has(ElementIds.Name)) title.MaxWidth = compact ? 104 : 144;
         Grid.SetColumn(title, 1);
         heading.Children.Add(title);
-        _status = Text("", compact ? 8 : 10, Theme.Warning);
-        _status.Visibility = Visibility.Collapsed;
-        _status.Margin = new Thickness(5, 0, 0, 0);
-        Grid.SetColumn(_status, 2);
-        heading.Children.Add(_status);
-        body.Children.Add(heading);
 
         if (Has(ElementIds.Name))
         {
             _model = Text(IsTotal ? "모든 물리 디스크" : string.IsNullOrWhiteSpace(device.Model) ? "확인 불가" : device.Model,
                 compact ? 9 : 10, Theme.Muted);
-            _model.Margin = new Thickness(0, 2, 0, 0);
+            _model.Margin = new Thickness(6, 0, 0, 0);
             _model.ToolTip = _model.Text;
-            body.Children.Add(_model);
+            Grid.SetColumn(_model, 2);
+            heading.Children.Add(_model);
         }
+        _status = Text("", compact ? 8 : 10, Theme.Warning);
+        _status.Visibility = Visibility.Collapsed;
+        _status.Margin = new Thickness(5, 0, 0, 0);
+        Grid.SetColumn(_status, Has(ElementIds.Name) ? 3 : 2);
+        heading.Children.Add(_status);
+        body.Children.Add(heading);
 
         if (Has(ElementIds.Read) || Has(ElementIds.Write))
         {
