@@ -37,6 +37,18 @@ public sealed class SettingsStore(string path)
             var settings = JsonSerializer.Deserialize<AppSettings>(json, JsonOptions)
                 ?? throw new JsonException("Settings must contain a JSON object.");
             DisplayCatalog.Normalize(settings);
+            // Missing profile properties use constructor defaults during deserialization.
+            // Inspect the saved document too, so even partial legacy settings keep Disk hidden.
+            using var document = JsonDocument.Parse(json);
+            foreach (var mode in Enum.GetValues<WidgetMode>())
+            {
+                var items = Property(Property(Property(document.RootElement, "DisplayProfiles"), mode.ToString()), "Items");
+                if (Property(items, "Disk").ValueKind == JsonValueKind.Undefined && Property(items, ((int)MetricKind.Disk).ToString(CultureInfo.InvariantCulture)).ValueKind == JsonValueKind.Undefined)
+                {
+                    var profile = settings.DisplayProfiles?.For(mode);
+                    if (profile?.Items is not null && profile.Items.TryGetValue(MetricKind.Disk, out var disk) && disk is not null) disk.Visible = false;
+                }
+            }
             return settings;
         }
         catch (JsonException)
@@ -44,6 +56,14 @@ public sealed class SettingsStore(string path)
             BackupMalformedFile();
             return new AppSettings();
         }
+    }
+
+    private static JsonElement Property(JsonElement element, string name)
+    {
+        if (element.ValueKind == JsonValueKind.Object)
+            foreach (var property in element.EnumerateObject())
+                if (property.Name.Equals(name, StringComparison.OrdinalIgnoreCase)) return property.Value;
+        return default;
     }
 
     private string ReadWithRetry()

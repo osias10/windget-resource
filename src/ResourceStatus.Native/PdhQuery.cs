@@ -17,6 +17,7 @@ internal sealed unsafe class PdhQuery : IDisposable
         internal uint Status { get; } = status;
         internal int Samples, ReadFailures;
         internal bool RestartRequested;
+        internal readonly DiskRateStateTracker DiskRateStates = new();
         // Reused across ticks so each array read is normally a single PDH call.
         internal nint Buffer;
         internal uint BufferBytes;
@@ -44,6 +45,16 @@ internal sealed unsafe class PdhQuery : IDisposable
         Add("gpu", @"\GPU Engine(*)\Utilization Percentage");
         Add("dedicated", @"\GPU Adapter Memory(*)\Dedicated Usage");
         Add("shared", @"\GPU Adapter Memory(*)\Shared Usage");
+        Add("diskRead", @"\PhysicalDisk(*)\Disk Read Bytes/sec");
+        Add("diskWrite", @"\PhysicalDisk(*)\Disk Write Bytes/sec");
+    }
+
+    internal void ResetDiskCounters()
+    {
+        foreach (var key in new[] { "diskRead", "diskWrite" })
+            if (_counters.TryGetValue(key, out var counter)) counter.RestartRequested = true;
+        Add("diskRead", @"\PhysicalDisk(*)\Disk Read Bytes/sec");
+        Add("diskWrite", @"\PhysicalDisk(*)\Disk Write Bytes/sec");
     }
 
     private void Add(string key, string path)
@@ -139,6 +150,46 @@ internal sealed unsafe class PdhQuery : IDisposable
         if (counter.ReadFailures >= 3) counter.RestartRequested = true;
         // A permanently invalid counter is an error, not a perpetual first-sample indicator.
         return state == ReadingState.WarmingUp && counter.ReadFailures >= 3 ? ReadingState.Error : state;
+    }
+
+    internal DiskRateBatch DiskRates(string key)
+    {
+        const uint rateFormat = DoubleFormat | 0x1000; // PDH_FMT_NOSCALE: actual bytes/sec, without the counter's default scale.
+        var c = _counters[key];
+        if (c.Handle == 0) return DiskRateBatch.Missing(State(c.Status), Error(c.Status));
+        if (_collectStatus != 0) return DiskRateBatch.Missing(State(_collectStatus), Error(_collectStatus));
+        if (c.Samples < 2) return DiskRateBatch.Missing(ReadingState.WarmingUp);
+        for (var attempt = 0; attempt < 3; attempt++)
+        {
+            uint bytes = c.BufferBytes, count = 0;
+            var status = bytes == 0 ? MoreData : PdhGetFormattedCounterArrayW(c.Handle, rateFormat, ref bytes, out count, c.Buffer);
+            if (status == MoreData)
+            {
+                bytes = 0;
+                status = PdhGetFormattedCounterArrayW(c.Handle, rateFormat, ref bytes, out _, 0);
+                if (status != MoreData && status != 0) return DiskRateBatch.Missing(Observe(c, State(status)), Error(status));
+                if (bytes == 0) return DiskRateBatch.Missing(Observe(c, ReadingState.Unsupported));
+                if (bytes > MaxBuffer) return DiskRateBatch.Missing(Observe(c, ReadingState.Error), "디스크 카운터 버퍼가 너무 큽니다.");
+                c.FreeBuffer();
+                c.BufferBytes = bytes + bytes / 4 + 4096;
+                c.Buffer = Marshal.AllocHGlobal(checked((int)c.BufferBytes));
+                continue;
+            }
+            if (status != 0) return DiskRateBatch.Missing(Observe(c, State(status)), Error(status));
+            if ((ulong)count * (uint)sizeof(CounterItem) > bytes)
+                return DiskRateBatch.Missing(Observe(c, ReadingState.Error), "디스크 카운터 버퍼가 유효하지 않습니다.");
+            var samples = new List<PdhSample>(checked((int)count));
+            var items = (CounterItem*)c.Buffer;
+            for (var i = 0; i < count; i++)
+                samples.Add(new(Marshal.PtrToStringUni(items[i].Name) ?? "", items[i].Value.Status, items[i].Value.Value));
+            var batch = c.DiskRateStates.Observe(DiskRateSamples.Select(samples));
+            // Failures remain on their own instance; one inaccessible disk must not suppress other disks.
+            var state = batch.Values.Values.Any(x => x.IsReady) ? ReadingState.Ready
+                : batch.Values.Values.Select(x => x.State).FirstOrDefault(batch.State);
+            Observe(c, state);
+            return batch;
+        }
+        return DiskRateBatch.Missing(Observe(c, ReadingState.Error), "디스크 카운터가 변경되었습니다.");
     }
 
     private static string Error(uint status) => $"PDH 0x{status:X8}";

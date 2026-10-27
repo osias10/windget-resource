@@ -1,4 +1,5 @@
 using System.ComponentModel;
+using System.Collections.ObjectModel;
 using System.Diagnostics;
 using System.Runtime.InteropServices;
 using Microsoft.Win32;
@@ -14,6 +15,12 @@ public sealed class WindowsMetricsProvider : IMetricsProvider
     private List<GpuDevice> _gpuDevices = [];
     private IReadOnlyList<DeviceOption> _gpus = Array.Empty<DeviceOption>();
     private IReadOnlyList<DeviceOption> _networks = Array.Empty<DeviceOption>();
+    private IReadOnlyList<DiskDeviceOption> _disks = Array.AsReadOnly(new[] { DiskCatalog.TotalDevice });
+    private List<DiskDevice> _diskDevices = [];
+    private readonly DiskDeviceNotifications _diskNotifications;
+    private ReadingState _diskEnumerationState = ReadingState.Ready;
+    private string? _diskEnumerationDetail, _lastDiskInstances;
+    private long _lastDiskRefresh;
     private readonly string _cpuName;
     private Dictionary<Guid, uint>? _connectivity;
     private long _lastDevices, _lastConnectivity, _lastRead, _lastNetworkScan;
@@ -26,12 +33,15 @@ public sealed class WindowsMetricsProvider : IMetricsProvider
 
     public IReadOnlyList<DeviceOption> Gpus => Volatile.Read(ref _gpus);
     public IReadOnlyList<DeviceOption> Networks => Volatile.Read(ref _networks);
+    public IReadOnlyList<DiskDeviceOption> Disks => Volatile.Read(ref _disks);
 
     public WindowsMetricsProvider()
     {
         if (!OperatingSystem.IsWindows()) throw new PlatformNotSupportedException("Windows에서만 실행할 수 있습니다.");
         _cpuName = ReadCpuName();
         _pdh = new PdhQuery();
+        _diskNotifications = new DiskDeviceNotifications();
+        RefreshDisks(Stopwatch.GetTimestamp(), false);
         RefreshGpus();
         try
         {
@@ -53,6 +63,10 @@ public sealed class WindowsMetricsProvider : IMetricsProvider
             // Reset sampling after sleep, suspend or an unusually long scheduling delay.
             if (_lastRead != 0 && Stopwatch.GetElapsedTime(_lastRead, now) > TimeSpan.FromSeconds(5)) ResetCore();
             var refresh = _lastDevices == 0 || Stopwatch.GetElapsedTime(_lastDevices, now) >= TimeSpan.FromSeconds(30);
+            var diskChanges = _diskNotifications.ConsumeChanges();
+            if (diskChanges != 0 || _lastDiskRefresh == 0
+                || Stopwatch.GetElapsedTime(_lastDiskRefresh, now) >= TimeSpan.FromSeconds(_diskEnumerationState == ReadingState.Ready ? 30 : 5))
+                RefreshDisks(now, (diskChanges & 1) != 0);
             if (refresh)
             {
                 RefreshGpus();
@@ -66,7 +80,8 @@ public sealed class WindowsMetricsProvider : IMetricsProvider
             var ram = ReadRam();
             var gpu = ReadGpu(gpuId);
             var network = ReadNetwork(networkId, now, refresh);
-            return new(DateTimeOffset.Now, cpu, ram, gpu, network);
+            var disks = ReadDisks(now);
+            return new(DateTimeOffset.Now, cpu, ram, gpu, network) { Disks = disks };
         }
     }
 
@@ -85,7 +100,74 @@ public sealed class WindowsMetricsProvider : IMetricsProvider
         _pdh = new PdhQuery();
         _previousNetwork = null;
         _lastRead = _lastDevices = _lastConnectivity = _lastNetworkScan = 0;
+        _lastDiskRefresh = 0;
+        _lastDiskInstances = null;
         _connectivity = null;
+    }
+
+    private void RefreshDisks(long now, bool forceReset)
+    {
+        _lastDiskRefresh = now;
+        try
+        {
+            var devices = DiskDevices.Enumerate();
+            if (forceReset || DiskRateSamples.TopologyChanged(_diskDevices.Select(x => x.Option), devices.Select(x => x.Option)))
+            {
+                _pdh.ResetDiskCounters();
+                _lastDiskInstances = null;
+            }
+            _diskDevices = devices;
+            var options = new[] { DiskCatalog.TotalDevice }.Concat(devices.Select(x => x.Option)).ToArray();
+            if (!_disks.SequenceEqual(options)) Volatile.Write(ref _disks, Array.AsReadOnly(options));
+            _diskEnumerationState = ReadingState.Ready;
+            _diskEnumerationDetail = null;
+        }
+        catch (Exception ex) when (ex is not OutOfMemoryException)
+        {
+            // Keep IDs/names available while reporting the enumeration failure explicitly. The total counter
+            // is independent of metadata and can still be read. A failure never stops CPU/GPU/network sampling.
+            _diskEnumerationState = ex is Win32Exception { NativeErrorCode: 5 } or UnauthorizedAccessException
+                ? ReadingState.AccessDenied : ReadingState.Error;
+            _diskEnumerationDetail = ex.Message;
+            if (forceReset)
+            {
+                _pdh.ResetDiskCounters();
+                _lastDiskInstances = null;
+            }
+        }
+    }
+
+    private IReadOnlyDictionary<string, DiskSnapshot> ReadDisks(long now)
+    {
+        var read = _pdh.DiskRates("diskRead");
+        var write = _pdh.DiskRates("diskWrite");
+        // Notifications normally refresh immediately. Counter instance changes also detect topology changes
+        // if registration is unavailable, and the periodic scan covers same-number device replacement.
+        if (read.Values.Count > 0 || write.Values.Count > 0)
+        {
+            var instances = string.Join(',', read.Values.Keys.Concat(write.Values.Keys)
+                .Select(DiskRateSamples.DeviceNumber).Where(x => x.HasValue).Select(x => x!.Value).Distinct().Order());
+            if (_lastDiskInstances is not null && !instances.Equals(_lastDiskInstances, StringComparison.Ordinal))
+            {
+                RefreshDisks(now, true);
+                read = DiskRateBatch.Missing(ReadingState.WarmingUp);
+                write = DiskRateBatch.Missing(ReadingState.WarmingUp);
+            }
+            _lastDiskInstances = instances;
+        }
+        var result = new Dictionary<string, DiskSnapshot>(StringComparer.OrdinalIgnoreCase)
+        {
+            [DiskCatalog.TotalId] = new(DiskCatalog.TotalDevice, read.For(null, true), write.For(null, true))
+        };
+        foreach (var device in _diskDevices)
+        {
+            var state = _diskEnumerationState == ReadingState.Ready ? device.State : _diskEnumerationState;
+            var missing = Reading<double>.Missing(state, _diskEnumerationDetail ?? device.Detail);
+            result[device.Option.Id] = new(device.Option,
+                state == ReadingState.Ready ? read.For(device.Option.Number) : missing,
+                state == ReadingState.Ready ? write.For(device.Option.Number) : missing);
+        }
+        return new ReadOnlyDictionary<string, DiskSnapshot>(result);
     }
 
     private void RefreshGpus()
@@ -260,6 +342,7 @@ public sealed class WindowsMetricsProvider : IMetricsProvider
         {
             if (_disposed) return;
             _disposed = true;
+            _diskNotifications.Dispose();
             _pdh.Dispose();
         }
     }

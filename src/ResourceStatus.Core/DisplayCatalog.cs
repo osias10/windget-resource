@@ -22,14 +22,18 @@ public static class DisplayCatalog
                 new(ElementIds.DownloadGraph, "다운로드 그래프"), new(ElementIds.UploadGraph, "업로드 그래프"),
                 new(ElementIds.Usage, "링크 사용률 숫자"), new(ElementIds.Gauge, "링크 사용률 게이지"),
                 new(ElementIds.ReceiveLink, "수신 링크 속도"), new(ElementIds.TransmitLink, "송신 링크 속도"),
-                new(ElementIds.Name, "어댑터 이름"), new(ElementIds.Connection, "연결 상태") })
+                new(ElementIds.Name, "어댑터 이름"), new(ElementIds.Connection, "연결 상태") }),
+            [MetricKind.Disk] = Array.AsReadOnly(new[] {
+                new DisplayElement(ElementIds.Read, "읽기 속도"), new(ElementIds.Write, "쓰기 속도"),
+                new(ElementIds.ReadGraph, "읽기 그래프"), new(ElementIds.WriteGraph, "쓰기 그래프"),
+                new(ElementIds.Name, "장치 모델명") })
         };
 
     public static IReadOnlyList<DisplayElement> Elements(MetricKind kind) => Catalog[kind];
 
     public static string Label(MetricKind kind) => kind switch
     {
-        MetricKind.Cpu => "CPU", MetricKind.Ram => "RAM", MetricKind.Gpu => "GPU", MetricKind.Network => "네트워크",
+        MetricKind.Cpu => "CPU", MetricKind.Ram => "RAM", MetricKind.Gpu => "GPU", MetricKind.Network => "네트워크", MetricKind.Disk => "디스크",
         _ => throw new ArgumentOutOfRangeException(nameof(kind))
     };
 
@@ -41,6 +45,8 @@ public static class DisplayCatalog
             string[] elements = (mode, kind) switch
             {
                 (WidgetMode.Compact, MetricKind.Network) => [ElementIds.Download, ElementIds.Upload, ElementIds.Connection],
+                (WidgetMode.Compact, MetricKind.Disk) => [ElementIds.Read, ElementIds.Write],
+                (_, MetricKind.Disk) => [ElementIds.Read, ElementIds.Write, ElementIds.ReadGraph, ElementIds.WriteGraph, ElementIds.Name],
                 (WidgetMode.Compact, _) => [ElementIds.Usage, ElementIds.Gauge],
                 (_, MetricKind.Cpu) => [ElementIds.Usage, ElementIds.Graph, ElementIds.Name],
                 (_, MetricKind.Ram) => [ElementIds.Usage, ElementIds.Used, ElementIds.Total, ElementIds.Graph],
@@ -75,7 +81,7 @@ public static class DisplayCatalog
         if (!Enum.IsDefined(settings.Theme)) settings.Theme = ThemeMode.Dark;
         settings.BackgroundTransparency = Math.Clamp(settings.BackgroundTransparency, 0, 100);
         var usageColors = UsageColorPolicy.CreateDefaults();
-        foreach (var kind in Enum.GetValues<MetricKind>())
+        foreach (var kind in UsageColorPolicy.SupportedMetrics)
             if (settings.UsageColors is not null && settings.UsageColors.TryGetValue(kind, out var options))
                 usageColors[kind] = UsageColorPolicy.NormalizeOptions(options);
         settings.UsageColors = usageColors;
@@ -111,6 +117,9 @@ public static class DisplayCatalog
     private static DisplayProfile NormalizeProfile(DisplayProfile? existing, WidgetMode mode)
     {
         var defaults = CreateDefaults(mode);
+        // Older profiles have no Disk entry. Keep their layout (including all-hidden layouts).
+        if (existing?.Items is not null && !existing.Items.ContainsKey(MetricKind.Disk)) defaults.Items[MetricKind.Disk].Visible = false;
+        defaults.DiskSources = DiskCatalog.NormalizeSources(existing?.DiskSources);
         foreach (var kind in Enum.GetValues<MetricKind>())
         {
             if (existing?.Items is null || !existing.Items.TryGetValue(kind, out var options) || options is null) continue;

@@ -86,7 +86,7 @@ internal static class UsageColorUiSmoke
             foreach (var theme in new[] { AppThemeMode.Dark, AppThemeMode.Light })
             {
                 Theme.Apply(theme);
-                foreach (var kind in Enum.GetValues<MetricKind>())
+                foreach (var kind in UsageColorPolicy.SupportedMetrics)
                 {
                     var settings = ForMetric(kind);
                     var colors = new UsageColorTimeline();
@@ -226,7 +226,7 @@ internal static class UsageColorUiSmoke
                 await Flush();
                 var tab = (TabItem)settingsWindow.ProfileTabs.Items[3];
                 var content = (DependencyObject)tab.Content;
-                Assert(tab.Name == "UsageColorsTab" && Enum.GetValues<MetricKind>().All(kind =>
+                Assert(tab.Name == "UsageColorsTab" && UsageColorPolicy.SupportedMetrics.All(kind =>
                     Control<CheckBox>("UsageColorEnabled" + kind).IsChecked == true
                     && Control<TextBox>("UsageColorWarning" + kind).Text == "80"
                     && Control<TextBox>("UsageColorCritical" + kind).Text == "95"),

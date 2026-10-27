@@ -5,6 +5,6 @@
     <ImplicitUsings>enable</ImplicitUsings>
     <LangVersion>latest</LangVersion>
     <Deterministic>true</Deterministic>
-    <Version>0.0.4</Version>
+    <Version>0.0.5-beta.1</Version>
   </PropertyGroup>
 </Project>

@@ -26,11 +26,17 @@ public sealed class HistoryBuffer
         _samples.Add(new HistorySample(snapshot.Timestamp,
             Value(snapshot.Cpu.Usage), Value(snapshot.Ram.Usage), Value(snapshot.Gpu.Usage),
             Value(snapshot.Network.DownloadBytesPerSecond), Value(snapshot.Network.UploadBytesPerSecond),
-            snapshot.Gpu.DeviceId, snapshot.Network.DeviceId, Value(snapshot.Network.LinkUsage)));
+            snapshot.Gpu.DeviceId, snapshot.Network.DeviceId, Value(snapshot.Network.LinkUsage))
+        {
+            Disks = new ReadOnlyDictionary<string, DiskHistorySample>(snapshot.Disks.ToDictionary(pair => pair.Key,
+                pair => new DiskHistorySample(Rate(pair.Value.ReadBytesPerSecond), Rate(pair.Value.WriteBytesPerSecond)), StringComparer.OrdinalIgnoreCase))
+        });
         var cutoff = snapshot.Timestamp.AddSeconds(-60);
         _samples.RemoveAll(x => x.Timestamp < cutoff);
     }
 
     private static double? Value(Reading<double> reading) =>
         reading.IsReady && double.IsFinite(reading.Value!.Value) ? reading.Value.Value : null;
+
+    private static double? Rate(Reading<double> reading) => Value(reading) is { } value && value >= 0 ? value : null;
 }

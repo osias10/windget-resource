@@ -41,7 +41,7 @@ internal static class Diagnostics
                 CpuPercentOfMachine = (process.TotalProcessorTime - startCpu).TotalSeconds / Math.Max(.001, clock.Elapsed.TotalSeconds) / Environment.ProcessorCount * 100,
                 PrivateMemoryMiB = process.PrivateMemorySize64 / 1048576d,
                 AverageReadMs = sumReadMs / samples.Count, MaxReadMs = maxReadMs,
-                provider.Gpus, provider.Networks,
+                provider.Gpus, provider.Networks, provider.Disks,
                 Samples = samples.Count > 15 ? samples.GetRange(samples.Count - 15, 15) : samples
             };
             var options = new JsonSerializerOptions { WriteIndented = true, Converters = { new JsonStringEnumConverter() } };

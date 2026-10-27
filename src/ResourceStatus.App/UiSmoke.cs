@@ -78,7 +78,7 @@ internal static class UiSmoke
                         WidgetView view = mode == WidgetMode.Compact ? new CompactWidgetView() : new ExpandedWidgetView();
                         view.Refresh(settings, snapshot, history);
                         Layout(view, mode == WidgetMode.Compact ? 230 : 310);
-                        var hasChart = element.Id is ElementIds.Graph or ElementIds.DownloadGraph or ElementIds.UploadGraph;
+                        var hasChart = element.Id is ElementIds.Graph or ElementIds.DownloadGraph or ElementIds.UploadGraph or ElementIds.ReadGraph or ElementIds.WriteGraph;
                         var hasGauge = element.Id == ElementIds.Gauge;
                         Assert(Descendants<HistoryChart>(view).Count() == (hasChart ? 1 : 0)
                             && Descendants<ThinGauge>(view).Count() == (hasGauge ? 1 : 0)
@@ -457,6 +457,7 @@ internal static class UiSmoke
             await WindowBehaviorUiSmoke.RunAsync(checks, directory);
             await PlacementUiSmoke.RunAsync(checks, directory);
             await UsageColorUiSmoke.RunAsync(checks, directory, renderingAvailable, controller.Settings.Theme);
+            await DiskUiSmoke.RunAsync(checks, directory, renderingAvailable, controller.Settings.Theme);
             WriteReport(output, checks, skipped, renderingAvailable, null);
         }
         catch (Exception error)

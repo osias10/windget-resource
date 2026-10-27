@@ -2,7 +2,7 @@ namespace ResourceStatus.Core;
 
 public enum WidgetMode { Compact, Expanded }
 public enum ThemeMode { Dark, Light, System }
-public enum MetricKind { Cpu, Ram, Gpu, Network }
+public enum MetricKind { Cpu, Ram, Gpu, Network, Disk }
 public enum ReadingState { Ready, WarmingUp, Unsupported, AccessDenied, Error }
 public enum UsageSeverity { Normal, Warning, Critical }
 
@@ -14,6 +14,9 @@ public readonly record struct Reading<T>(T? Value, ReadingState State, string? D
 }
 
 public sealed record DeviceOption(string Id, string Name);
+public sealed record DiskDeviceOption(string Id, string Name, string Model, int? Number);
+public sealed record DiskSnapshot(DiskDeviceOption Device, Reading<double> ReadBytesPerSecond, Reading<double> WriteBytesPerSecond);
+public sealed record DiskHistorySample(double? ReadBytesPerSecond, double? WriteBytesPerSecond);
 public sealed record CpuSnapshot(string Name, Reading<double> Usage);
 public sealed record RamSnapshot(Reading<double> Usage, Reading<ulong> UsedBytes, Reading<ulong> TotalBytes);
 public sealed record GpuSnapshot(string? DeviceId, string Name, Reading<double> Usage,
@@ -22,10 +25,16 @@ public sealed record NetworkSnapshot(string? DeviceId, string Name, Reading<doub
     Reading<double> UploadBytesPerSecond, Reading<double> LinkUsage,
     Reading<ulong> ReceiveLinkBitsPerSecond, Reading<ulong> TransmitLinkBitsPerSecond, string ConnectionStatus);
 public sealed record SystemSnapshot(DateTimeOffset Timestamp, CpuSnapshot Cpu, RamSnapshot Ram,
-    GpuSnapshot Gpu, NetworkSnapshot Network);
+    GpuSnapshot Gpu, NetworkSnapshot Network)
+{
+    public IReadOnlyDictionary<string, DiskSnapshot> Disks { get; init; } = System.Collections.Immutable.ImmutableDictionary<string, DiskSnapshot>.Empty.WithComparers(StringComparer.OrdinalIgnoreCase);
+}
 
 public sealed record HistorySample(DateTimeOffset Timestamp, double? Cpu, double? Ram,
-    double? Gpu, double? Download, double? Upload, string? GpuId, string? NetworkId, double? LinkUsage = null);
+    double? Gpu, double? Download, double? Upload, string? GpuId, string? NetworkId, double? LinkUsage = null)
+{
+    public IReadOnlyDictionary<string, DiskHistorySample> Disks { get; init; } = System.Collections.Immutable.ImmutableDictionary<string, DiskHistorySample>.Empty.WithComparers(StringComparer.OrdinalIgnoreCase);
+}
 
 public static class ElementIds
 {
@@ -34,6 +43,7 @@ public static class ElementIds
         DedicatedTotal = "dedicatedTotal", SharedUsed = "sharedUsed";
     public const string Download = "download", Upload = "upload", DownloadGraph = "downloadGraph",
         UploadGraph = "uploadGraph", ReceiveLink = "receiveLink", TransmitLink = "transmitLink", Connection = "connection";
+    public const string Read = "read", Write = "write", ReadGraph = "readGraph", WriteGraph = "writeGraph";
 }
 
 public sealed class MetricDisplayOptions
@@ -46,6 +56,13 @@ public sealed class MetricDisplayOptions
 public sealed class DisplayProfile
 {
     public Dictionary<MetricKind, MetricDisplayOptions> Items { get; set; } = [];
+    public List<DiskSourceSelection> DiskSources { get; set; } = [new() { Id = DiskCatalog.TotalId, Name = DiskCatalog.TotalDevice.Name }];
+}
+
+public sealed class DiskSourceSelection
+{
+    public string Id { get; set; } = "";
+    public string Name { get; set; } = "";
 }
 
 public sealed class DisplayProfiles
@@ -97,6 +114,7 @@ public interface IMetricsProvider : IDisposable
 {
     IReadOnlyList<DeviceOption> Gpus { get; }
     IReadOnlyList<DeviceOption> Networks { get; }
+    IReadOnlyList<DiskDeviceOption> Disks { get; }
     SystemSnapshot Read(string? gpuId, string? networkId);
     void Reset();
 }

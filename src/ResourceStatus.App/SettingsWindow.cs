@@ -24,6 +24,7 @@ public sealed class SettingsWindow : Window
     private readonly DispatcherTimer _transparencySaveTimer;
     private readonly Dictionary<string, CheckBox> _generalChecks = [];
     private readonly Dictionary<MetricKind, UsageColorEditor> _usageColorEditors = [];
+    private readonly Dictionary<WidgetMode, DiskSourceEditor> _diskSourceEditors = [];
     private bool _updating;
     private bool _transparencySavePending;
     private IReadOnlyList<DeviceOption>? _shownGpus, _shownNetworks;
@@ -95,9 +96,10 @@ public sealed class SettingsWindow : Window
     private UIElement ProfilePanel(WidgetMode mode)
     {
         var stack = new StackPanel { Margin = new Thickness(0, 15, 6, 0) };
+        var profile = _controller.Settings.DisplayProfiles.For(mode);
         foreach (var metric in Enum.GetValues<MetricKind>())
         {
-            var options = _controller.Settings.DisplayProfiles.For(mode).Items[metric];
+            var options = profile.Items[metric];
             var card = new StackPanel { Margin = new Thickness(12) };
             var head = new DockPanel { LastChildFill = true };
             var visible = new CheckBox { Content = "표시", IsChecked = options.Visible, VerticalAlignment = VerticalAlignment.Center, Name = "Visible" + metric };
@@ -129,7 +131,30 @@ public sealed class SettingsWindow : Window
                 choice.Unchecked += ChoiceChanged;
                 choices.Children.Add(choice);
             }
-            void VisibilityChanged(object sender, RoutedEventArgs args) { options.Visible = visible.IsChecked == true; choices.IsEnabled = options.Visible; Save(); }
+            DiskSourceEditor? diskEditor = null;
+            if (metric == MetricKind.Disk)
+            {
+                diskEditor = new DiskSourceEditor
+                {
+                    Profile = profile,
+                    Choices = new StackPanel { Name = "DiskSources" + mode, Margin = new Thickness(0, 8, 0, 0), IsEnabled = options.Visible }
+                };
+                _diskSourceEditors[mode] = diskEditor;
+                card.Children.Add(new TextBlock
+                {
+                    Text = "표시할 디스크 · 여러 개 선택 가능", Foreground = Theme.Muted,
+                    Margin = new Thickness(0, 12, 0, 0)
+                });
+                card.Children.Add(diskEditor.Choices);
+                UpdateDiskSources(diskEditor);
+            }
+            void VisibilityChanged(object sender, RoutedEventArgs args)
+            {
+                options.Visible = visible.IsChecked == true;
+                choices.IsEnabled = options.Visible;
+                if (diskEditor is not null) diskEditor.Choices.IsEnabled = options.Visible;
+                Save();
+            }
             visible.Checked += VisibilityChanged;
             visible.Unchecked += VisibilityChanged;
             card.Children.Add(choices);
@@ -145,6 +170,79 @@ public sealed class SettingsWindow : Window
         };
         stack.Children.Add(restore);
         return new ScrollViewer { VerticalScrollBarVisibility = ScrollBarVisibility.Auto, HorizontalScrollBarVisibility = ScrollBarVisibility.Disabled, Content = stack };
+    }
+
+    private sealed class DiskSourceEditor
+    {
+        public required DisplayProfile Profile { get; init; }
+        public required StackPanel Choices { get; init; }
+        public Dictionary<string, CheckBox> Controls { get; } = new(StringComparer.OrdinalIgnoreCase);
+        public bool Updating { get; set; }
+    }
+
+    private void UpdateDiskSources(DiskSourceEditor editor)
+    {
+        var detected = _controller.Disks
+            .Where(device => !string.Equals(device.Id, DiskCatalog.TotalId, StringComparison.OrdinalIgnoreCase))
+            .OrderBy(device => device.Number ?? int.MaxValue).ThenBy(device => device.Name, StringComparer.CurrentCulture)
+            .ToList();
+        var devices = new List<DiskDeviceOption> { DiskCatalog.TotalDevice };
+        devices.AddRange(detected);
+        var connected = devices.Select(device => device.Id).ToHashSet(StringComparer.OrdinalIgnoreCase);
+        foreach (var selected in editor.Profile.DiskSources)
+            if (!connected.Contains(selected.Id)) devices.Add(new(selected.Id, selected.Name, "", null));
+        editor.Updating = true;
+        try
+        {
+            var ids = devices.Select(device => device.Id).ToHashSet(StringComparer.OrdinalIgnoreCase);
+            foreach (var removed in editor.Controls.Keys.Where(id => !ids.Contains(id)).ToArray())
+            {
+                editor.Choices.Children.Remove(editor.Controls[removed]);
+                editor.Controls.Remove(removed);
+            }
+            for (int index = 0; index < devices.Count; index++)
+            {
+                var device = devices[index];
+                if (!editor.Controls.TryGetValue(device.Id, out var choice))
+                {
+                    choice = new CheckBox { Tag = device.Id, Margin = new Thickness(0, 0, 0, 9), HorizontalContentAlignment = HorizontalAlignment.Stretch };
+                    var text = new TextBlock { TextTrimming = TextTrimming.CharacterEllipsis };
+                    choice.Content = text;
+                    editor.Controls.Add(device.Id, choice);
+                    void SourceChanged(object sender, RoutedEventArgs args)
+                    {
+                        if (editor.Updating) return;
+                        // Use current device metadata: an existing ID can acquire a new disk number or drive letter.
+                        var current = _controller.Disks.FirstOrDefault(item => string.Equals(item.Id, device.Id, StringComparison.OrdinalIgnoreCase)) ?? device;
+                        if (!DiskCatalog.TrySetSource(editor.Profile, current, choice.IsChecked == true))
+                        {
+                            editor.Updating = true;
+                            choice.IsChecked = true;
+                            editor.Updating = false;
+                            _message.Text = "표시할 디스크는 하나 이상 필요합니다. 디스크 전체를 숨기려면 ‘표시’를 끄세요.";
+                            _message.Foreground = Theme.Warning;
+                            return;
+                        }
+                        Save();
+                    }
+                    choice.Checked += SourceChanged;
+                    choice.Unchecked += SourceChanged;
+                }
+                string label = connected.Contains(device.Id) ? device.Name : device.Name + " · 연결 안 됨";
+                ((TextBlock)choice.Content).Text = label;
+                choice.ToolTip = string.IsNullOrWhiteSpace(device.Model) ? label : label + "\n" + device.Model;
+                System.Windows.Automation.AutomationProperties.SetName(choice, "표시할 디스크 " + label);
+                choice.IsChecked = editor.Profile.DiskSources.Any(source => string.Equals(source.Id, device.Id, StringComparison.OrdinalIgnoreCase));
+                // Stable IDs retain their control and keyboard focus across normal 1-second updates.
+                if (editor.Choices.Children.IndexOf(choice) != index)
+                {
+                    editor.Choices.Children.Remove(choice);
+                    editor.Choices.Children.Insert(index, choice);
+                }
+            }
+            editor.Choices.IsEnabled = editor.Profile.Items[MetricKind.Disk].Visible;
+        }
+        finally { editor.Updating = false; }
     }
 
     private sealed class UsageColorEditor
@@ -168,7 +266,7 @@ public sealed class SettingsWindow : Window
             Foreground = Theme.Muted, TextWrapping = TextWrapping.Wrap, LineHeight = 19,
             Margin = new Thickness(2, 0, 2, 14)
         });
-        foreach (var metric in Enum.GetValues<MetricKind>())
+        foreach (var metric in UsageColorPolicy.SupportedMetrics)
         {
             string label = DisplayCatalog.Label(metric);
             var options = _controller.Settings.UsageColors[metric];
@@ -570,6 +668,7 @@ public sealed class SettingsWindow : Window
 
     private void UpdateDevices()
     {
+        foreach (var editor in _diskSourceEditors.Values) UpdateDiskSources(editor);
         // AppController keeps the same list instances while the detected devices are unchanged.
         if (ReferenceEquals(_shownGpus, _controller.Gpus) && ReferenceEquals(_shownNetworks, _controller.Networks)
             && _shownGpuId == _controller.Settings.SelectedGpuId && _shownNetworkId == _controller.Settings.SelectedNetworkId) return;

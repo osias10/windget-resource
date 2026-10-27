@@ -29,6 +29,7 @@ public sealed class HistoryChart : FrameworkElement
     private RectangleGeometry? _clip;
     private bool _cacheDark;
     private double _cacheDip;
+    private bool IsRate => _kind is MetricKind.Network or MetricKind.Disk;
 
     public HistoryChart(MetricKind kind, bool compact, bool download = false, bool upload = false)
     {
@@ -60,7 +61,7 @@ public sealed class HistoryChart : FrameworkElement
         var top = _compact ? 9d : 12d;
         var bottom = ActualHeight - (_compact ? 8d : 10d);
         var chart = new Rect(0, top, width, Math.Max(2, bottom - top));
-        var max = _kind == MetricKind.Network ? NetworkMaximum() : 100d;
+        var max = IsRate ? RateMaximum() : 100d;
         var dip = VisualTreeHelper.GetDpi(this).PixelsPerDip;
         if (_gridPen is null || _cacheDark != Theme.IsDark || _cacheDip != dip)
         {
@@ -77,12 +78,13 @@ public sealed class HistoryChart : FrameworkElement
         dc.DrawLine(pen, new Point(0, chart.Bottom), new Point(width, chart.Bottom));
         if (!_compact) dc.DrawLine(pen, new Point(0, chart.Top + chart.Height / 2), new Point(width, chart.Top + chart.Height / 2));
 
-        if (_kind == MetricKind.Network)
+        if (IsRate)
         {
             double legendX = 0;
-            var level = _options?.Enabled == true ? _colors?.GetLevel(_kind, _now) ?? UsageSeverity.Normal : UsageSeverity.Normal;
-            if (_download) legendX += Legend(dc, "↓ 수신", level, false, legendX, dip) + 8;
-            if (_upload) Legend(dc, "↑ 송신", level, true, legendX, dip);
+            var level = _kind == MetricKind.Network && _options?.Enabled == true
+                ? _colors?.GetLevel(_kind, _now) ?? UsageSeverity.Normal : UsageSeverity.Normal;
+            if (_download) legendX += Legend(dc, _kind == MetricKind.Disk ? "읽기" : "↓ 수신", level, false, legendX, dip) + 8;
+            if (_upload) Legend(dc, _kind == MetricKind.Disk ? "쓰기" : "↑ 송신", level, true, legendX, dip);
             var axis = FormatRate(max);
             if (_axis?.Text != axis) _axis = Format(axis, Theme.Muted, dip);
             Label(dc, _axis, width, 0, true);
@@ -93,10 +95,10 @@ public sealed class HistoryChart : FrameworkElement
 
         if (_clip?.Rect != chart) { _clip = new RectangleGeometry(chart); _clip.Freeze(); }
         dc.PushClip(_clip);
-        if (_kind == MetricKind.Network)
+        if (IsRate)
         {
-            if (_download) DrawSeries(dc, chart, max, sample => sample.NetworkId == _deviceId ? sample.Download : null, false);
-            if (_upload) DrawSeries(dc, chart, max, sample => sample.NetworkId == _deviceId ? sample.Upload : null, true);
+            if (_download) DrawSeries(dc, chart, max, sample => Rate(sample, false), false);
+            if (_upload) DrawSeries(dc, chart, max, sample => Rate(sample, true), true);
         }
         else
         {
@@ -111,14 +113,23 @@ public sealed class HistoryChart : FrameworkElement
         dc.Pop();
     }
 
-    private double NetworkMaximum()
+    private double? Rate(HistorySample sample, bool write)
+    {
+        if (_kind == MetricKind.Network) return sample.NetworkId == _deviceId ? write ? sample.Upload : sample.Download : null;
+        if (_deviceId is null) return null;
+        if (!sample.Disks.TryGetValue(_deviceId, out var disk))
+            disk = sample.Disks.FirstOrDefault(pair => pair.Key.Equals(_deviceId, StringComparison.OrdinalIgnoreCase)).Value;
+        return write ? disk?.WriteBytesPerSecond : disk?.ReadBytesPerSecond;
+    }
+
+    private double RateMaximum()
     {
         var maximum = 0d;
         foreach (var sample in _history)
         {
-            if (sample.NetworkId != _deviceId || (_now - sample.Timestamp).TotalSeconds is < 0 or > 60) continue;
-            if (_download && sample.Download is double down && double.IsFinite(down)) maximum = Math.Max(maximum, down);
-            if (_upload && sample.Upload is double up && double.IsFinite(up)) maximum = Math.Max(maximum, up);
+            if ((_now - sample.Timestamp).TotalSeconds is < 0 or > 60) continue;
+            if (_download && Rate(sample, false) is double down && double.IsFinite(down)) maximum = Math.Max(maximum, down);
+            if (_upload && Rate(sample, true) is double up && double.IsFinite(up)) maximum = Math.Max(maximum, up);
         }
         // A stable, legible ceiling in decimal byte units; idle charts still have a meaningful axis.
         maximum = Math.Max(1000, maximum * 1.1);
@@ -168,7 +179,8 @@ public sealed class HistoryChart : FrameworkElement
             {
                 var age = (_now - sample.Timestamp).TotalSeconds;
                 var value = select(sample);
-                if (age is < 0 or > 60 || value is not double number || !double.IsFinite(number))
+                if (age is < 0 or > 60 || value is not double number || !double.IsFinite(number)
+                    || (_kind == MetricKind.Disk && number < 0))
                 {
                     previous = null;
                     continue;
@@ -248,7 +260,8 @@ public sealed class HistoryChart : FrameworkElement
 
     private double? Usage(HistorySample sample) => _kind switch
     {
-        MetricKind.Cpu => sample.Cpu, MetricKind.Ram => sample.Ram, MetricKind.Gpu => sample.Gpu, _ => sample.LinkUsage
+        MetricKind.Cpu => sample.Cpu, MetricKind.Ram => sample.Ram, MetricKind.Gpu => sample.Gpu,
+        MetricKind.Network => sample.LinkUsage, _ => null
     };
 
     private FormattedText Static(string text, Brush color, double dip)

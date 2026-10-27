@@ -118,7 +118,7 @@ var cases = new (string Name, Action Run)[]
         var timeline = new UsageColorTimeline();
         timeline.Update(samples, UsageColorPolicy.CreateDefaults());
         for (int index = 0; index < samples.Length; index++)
-            foreach (var kind in Enum.GetValues<MetricKind>()) Equal(expected[index], timeline.GetLevel(kind, samples[index].Timestamp));
+            foreach (var kind in UsageColorPolicy.SupportedMetrics) Equal(expected[index], timeline.GetLevel(kind, samples[index].Timestamp));
         timeline.Update([UsageSample(start.AddSeconds(20), 10) with { Download = 999_999_999, Upload = 999_999_999, LinkUsage = null }], UsageColorPolicy.CreateDefaults());
         Equal(UsageSeverity.Normal, timeline.GetLevel(MetricKind.Network, start.AddSeconds(20)));
         Equal(UsageSeverity.Normal, timeline.GetLevel(MetricKind.Cpu, start.AddSeconds(100)));
@@ -157,7 +157,7 @@ var cases = new (string Name, Action Run)[]
         Equal(UsageSeverity.Warning, timeline.GetLevel(MetricKind.Network, samples[1].Timestamp));
         var resumed = UsageSample(start.AddSeconds(5), 94) with { GpuId = "gpu2", NetworkId = "net2" };
         timeline.Update([.. samples, resumed], options);
-        foreach (var kind in Enum.GetValues<MetricKind>()) Equal(UsageSeverity.Warning, timeline.GetLevel(kind, resumed.Timestamp));
+        foreach (var kind in UsageColorPolicy.SupportedMetrics) Equal(UsageSeverity.Warning, timeline.GetLevel(kind, resumed.Timestamp));
         timeline.Update([], options);
         timeline.Update([UsageSample(start.AddSeconds(6), 79)], options);
         Equal(UsageSeverity.Normal, timeline.GetLevel(MetricKind.Cpu, start.AddSeconds(6)));
@@ -828,7 +828,7 @@ var cases = new (string Name, Action Run)[]
     }),
     ("Every approved element exists exactly once", () =>
     {
-        var expected = new Dictionary<MetricKind, int> { [MetricKind.Cpu] = 4, [MetricKind.Ram] = 5, [MetricKind.Gpu] = 7, [MetricKind.Network] = 10 };
+        var expected = new Dictionary<MetricKind, int> { [MetricKind.Cpu] = 4, [MetricKind.Ram] = 5, [MetricKind.Gpu] = 7, [MetricKind.Network] = 10, [MetricKind.Disk] = 5 };
         foreach (var (kind, count) in expected)
         {
             var elements = DisplayCatalog.Elements(kind);
@@ -864,7 +864,7 @@ var cases = new (string Name, Action Run)[]
         settings.Placements[WidgetMode.Compact] = new WindowPlacement { Left = double.NaN, Top = 2 };
         DisplayCatalog.Normalize(settings);
         Equal(WidgetMode.Compact, settings.WidgetMode);
-        Equal(4, settings.DisplayProfiles.Compact.Items.Count);
+        Equal(5, settings.DisplayProfiles.Compact.Items.Count);
         Check(!settings.DisplayProfiles.Compact.Items[MetricKind.Cpu].Has("future"), "Unknown element removed");
         Check(!settings.DisplayProfiles.Compact.Items[MetricKind.Cpu].Visible, "Hidden state retained");
         settings.DisplayProfiles.Compact.Items[MetricKind.Cpu].Elements.Add(ElementIds.Usage);
@@ -978,7 +978,7 @@ var cases = new (string Name, Action Run)[]
         File.WriteAllText(path, """{"futureVersionFeature":{"new":true},"AlwaysOnTop":false,"DisplayProfiles":{"Compact":{"Items":{"Cpu":{"Visible":false,"Elements":["graph","future"]}}}}}""");
         var loaded = new SettingsStore(path).Load();
         Check(!loaded.AlwaysOnTop, "Known field loaded");
-        Equal(4, loaded.DisplayProfiles.Compact.Items.Count);
+        Equal(5, loaded.DisplayProfiles.Compact.Items.Count);
         Check(loaded.DisplayProfiles.Compact.Items[MetricKind.Cpu].Elements.SetEquals([ElementIds.Graph]), "Unknown element omitted");
         Check(!loaded.DisplayProfiles.Compact.Items[MetricKind.Cpu].Visible, "Hidden retained");
         Check(loaded.DisplayProfiles.Expanded.Items[MetricKind.Network].Has(ElementIds.DownloadGraph), "Expanded defaults available");
@@ -1140,7 +1140,7 @@ var cases = new (string Name, Action Run)[]
         Check(!loaded.AlwaysOnTop, "Unrelated preference retained");
         Equal(1, loaded.Placements.Count);
         Near(7, loaded.Placements[WidgetMode.Expanded].Left);
-        Equal(4, loaded.DisplayProfiles.Compact.Items.Count);
+        Equal(5, loaded.DisplayProfiles.Compact.Items.Count);
         Check(!loaded.DisplayProfiles.Compact.Items[MetricKind.Cpu].Visible, "Known metric key retained");
         Equal(0, Directory.GetFiles(directory, "settings.json.corrupt-*.json").Length);
     })),
@@ -1208,6 +1208,7 @@ var cases = new (string Name, Action Run)[]
     })
 };
 
+cases = [.. cases, .. DiskTests.Cases()];
 var failures = 0;
 foreach (var (name, run) in cases)
 {

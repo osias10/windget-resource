@@ -25,6 +25,7 @@ public abstract class WidgetView : UserControl
     private readonly WidgetMode _mode;
     private readonly StackPanel _content = new();
     private readonly Dictionary<MetricKind, MetricRow> _rows = new();
+    private readonly List<DiskMetricRow> _diskRows = new();
     private readonly UsageColorTimeline _localColors = new();
     private string? _configuration;
     public event EventHandler? SettingsRequested;
@@ -48,24 +49,49 @@ public abstract class WidgetView : UserControl
             colors.Update(history, settings.UsageColors);
         }
         var profile = settings.DisplayProfiles.For(_mode);
+        var disks = SelectedDisks(profile, snapshot);
         var configuration = string.Join("|", Enum.GetValues<MetricKind>().Select(kind =>
             profile.Items.TryGetValue(kind, out var item)
-                ? $"{kind}:{item.Visible}:{string.Join(",", item.Elements.OrderBy(id => id, StringComparer.Ordinal))}" : $"{kind}:false"));
+                ? $"{kind}:{item.Visible}:{string.Join(",", item.Elements.OrderBy(id => id, StringComparer.Ordinal))}" : $"{kind}:false"))
+            + string.Join("|", disks.Select(disk => $"{disk.Id}:{disk.Name}:{disk.Model}:{disk.Number}"));
         if (_configuration != configuration)
         {
             _configuration = configuration;
-            Rebuild(profile);
+            Rebuild(profile, disks);
         }
         foreach (var row in _rows.Values) row.Update(snapshot, history, colors, settings.UsageColors[row.Kind]);
+        foreach (var row in _diskRows) row.Update(snapshot, history);
     }
 
-    private void Rebuild(DisplayProfile profile)
+    private static DiskDeviceOption[] SelectedDisks(DisplayProfile profile, SystemSnapshot snapshot) => profile.DiskSources
+        .DistinctBy(source => source.Id, StringComparer.OrdinalIgnoreCase)
+        .Select(source => DiskMetricRow.Find(snapshot.Disks, source.Id)?.Device
+            ?? (source.Id.Equals(DiskCatalog.TotalId, StringComparison.OrdinalIgnoreCase) ? DiskCatalog.TotalDevice
+                : new DiskDeviceOption(source.Id, source.Name, "", null)))
+        .OrderBy(device => device.Id.Equals(DiskCatalog.TotalId, StringComparison.OrdinalIgnoreCase) ? 0 : 1)
+        .ThenBy(device => device.Number ?? int.MaxValue)
+        .ThenBy(device => device.Name, StringComparer.OrdinalIgnoreCase)
+        .ToArray();
+
+    private void Rebuild(DisplayProfile profile, IReadOnlyList<DiskDeviceOption> disks)
     {
         _rows.Clear();
+        _diskRows.Clear();
         _content.Children.Clear();
         var visible = Enum.GetValues<MetricKind>().Where(kind => profile.Items.TryGetValue(kind, out var options) && options.Visible).ToArray();
         foreach (var kind in visible)
         {
+            if (kind == MetricKind.Disk)
+            {
+                for (var index = 0; index < disks.Count; index++)
+                {
+                    var disk = new DiskMetricRow(disks[index], profile.Items[kind], _mode == WidgetMode.Compact,
+                        kind != visible[^1] || index < disks.Count - 1);
+                    _diskRows.Add(disk);
+                    _content.Children.Add(disk);
+                }
+                continue;
+            }
             var row = new MetricRow(kind, profile.Items[kind], _mode == WidgetMode.Compact, kind != visible[^1]);
             _rows.Add(kind, row);
             _content.Children.Add(row);

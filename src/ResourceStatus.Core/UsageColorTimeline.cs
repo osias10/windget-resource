@@ -4,7 +4,7 @@ namespace ResourceStatus.Core;
 public sealed class UsageColorTimeline
 {
     private sealed record Entry(HistorySample Sample, UsageSeverity[] Levels);
-    private static readonly MetricKind[] Kinds = Enum.GetValues<MetricKind>();
+    private static readonly MetricKind[] Kinds = UsageColorPolicy.SupportedMetrics.ToArray();
     private readonly List<Entry> _entries = [];
     private readonly Dictionary<DateTimeOffset, UsageSeverity[]> _levels = [];
     private Entry? _predecessor;
@@ -89,7 +89,7 @@ public sealed class UsageColorTimeline
     }
 
     public UsageSeverity GetLevel(MetricKind kind, DateTimeOffset timestamp) =>
-        Enum.IsDefined(kind) && _levels.TryGetValue(timestamp, out var levels) ? levels[(int)kind] : UsageSeverity.Normal;
+        Kinds.Contains(kind) && _levels.TryGetValue(timestamp, out var levels) ? levels[(int)kind] : UsageSeverity.Normal;
 
     private static IReadOnlyList<HistorySample> ChronologicalSamples(IReadOnlyList<HistorySample> history)
     {

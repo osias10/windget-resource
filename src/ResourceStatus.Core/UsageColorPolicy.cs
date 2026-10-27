@@ -2,12 +2,13 @@ namespace ResourceStatus.Core;
 
 public static class UsageColorPolicy
 {
+    public static IReadOnlyList<MetricKind> SupportedMetrics { get; } = Array.AsReadOnly(new[] { MetricKind.Cpu, MetricKind.Ram, MetricKind.Gpu, MetricKind.Network });
     public const int RecoveryMargin = 3;
     // Very low custom thresholds must still be able to recover at 0%.
     public static double RecoveryThreshold(int threshold) => Math.Max(1, threshold - RecoveryMargin);
 
     public static Dictionary<MetricKind, UsageColorOptions> CreateDefaults() =>
-        Enum.GetValues<MetricKind>().ToDictionary(kind => kind, _ => new UsageColorOptions());
+        SupportedMetrics.ToDictionary(kind => kind, _ => new UsageColorOptions());
 
     public static bool IsValidThresholds(int warning, int critical) => warning >= 1 && warning < critical && critical <= 100;
 
